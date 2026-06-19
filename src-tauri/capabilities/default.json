@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the bit window",
-  "windows": ["bit"],
+  "description": "Capability for the bit and config windows",
+  "windows": ["bit", "config"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
