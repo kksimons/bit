@@ -1,6 +1,9 @@
+mod agent;
 mod audio;
+mod config;
 mod stt;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::{
@@ -13,14 +16,50 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 #[cfg(target_os = "macos")]
 use tauri::ActivationPolicy;
 
-/// Push-to-talk: hold to record, release to transcribe (Cmd+Shift+Space).
+/// Toggle dictation: press once to start, again to stop (Ctrl+Opt+Space).
 fn talk_shortcut() -> Shortcut {
-    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)
+    Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space)
 }
 
 struct AppState {
     recorder: audio::Recorder,
     stt: Arc<stt::Stt>,
+    /// Whether the shortcut key is physically held — debounces auto-repeat so a
+    /// held key toggles exactly once.
+    key_held: AtomicBool,
+}
+
+#[derive(serde::Serialize)]
+struct SettingsView {
+    base_url: String,
+    model: String,
+    has_key: bool,
+}
+
+#[tauri::command]
+fn get_settings(app: tauri::AppHandle) -> SettingsView {
+    let s = config::load_settings(&app);
+    SettingsView {
+        base_url: s.base_url,
+        model: s.model,
+        has_key: config::get_key().is_some(),
+    }
+}
+
+#[tauri::command]
+fn save_settings(
+    app: tauri::AppHandle,
+    base_url: String,
+    model: String,
+    api_key: Option<String>,
+) -> Result<(), String> {
+    config::save_settings(&app, &config::Settings { base_url, model })?;
+    if let Some(k) = api_key {
+        if !k.is_empty() {
+            config::set_key(&k)?;
+        }
+    }
+    Ok(())
 }
 
 /// Tell the Bit overlay to change form/state.
@@ -82,21 +121,19 @@ fn spawn_passthrough(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     });
 }
 
-/// Fired on hold (start recording) and release (stop + transcribe) of the
-/// push-to-talk shortcut.
-fn on_talk(app: &tauri::AppHandle, event_state: ShortcutState) {
+/// Toggle dictation on a fresh key press: start recording if idle, otherwise
+/// stop and run transcription → agent → yes/no.
+fn on_toggle(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
-    match event_state {
-        ShortcutState::Pressed => {
-            state.recorder.start();
-            set_bit_state(app, "listening");
-        }
-        ShortcutState::Released => {
-            let (samples, rate) = state.recorder.stop();
-            set_bit_state(app, "thinking");
-            let stt = state.stt.clone();
-            let app = app.clone();
-            std::thread::spawn(move || {
+    if !state.recorder.is_recording() {
+        state.recorder.start();
+        set_bit_state(app, "listening");
+    } else {
+        let (samples, rate) = state.recorder.stop();
+        set_bit_state(app, "thinking");
+        let stt = state.stt.clone();
+        let app = app.clone();
+        std::thread::spawn(move || {
                 let samples_16k = audio::resample_to_16k(&samples, rate);
                 let text = match stt
                     .ensure_loaded()
@@ -109,10 +146,32 @@ fn on_talk(app: &tauri::AppHandle, event_state: ShortcutState) {
                     }
                 };
                 println!("[bit] heard: {text:?}");
-                let _ = app.emit("transcript", text);
-                set_bit_state(&app, "neutral");
+                let _ = app.emit("transcript", text.clone());
+                if text.is_empty() {
+                    set_bit_state(&app, "neutral");
+                    return;
+                }
+                match config::load_agent_config(&app) {
+                    None => {
+                        eprintln!("[bit] no Z.AI key set — open Settings to add it");
+                        set_bit_state(&app, "neutral");
+                    }
+                    Some(cfg) => match agent::ask(&cfg, &text) {
+                        Ok(true) => {
+                            println!("[bit] → yes");
+                            set_bit_state(&app, "yes");
+                        }
+                        Ok(false) => {
+                            println!("[bit] → no");
+                            set_bit_state(&app, "no");
+                        }
+                        Err(e) => {
+                            eprintln!("[bit] agent error: {e}");
+                            set_bit_state(&app, "no");
+                        }
+                    },
+                }
             });
-        }
     }
 }
 
@@ -123,8 +182,20 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if shortcut == &talk_shortcut() {
-                        on_talk(app, event.state());
+                    if shortcut != &talk_shortcut() {
+                        return;
+                    }
+                    let state = app.state::<AppState>();
+                    match event.state() {
+                        // Fresh press toggles; ignore auto-repeat while held.
+                        ShortcutState::Pressed => {
+                            if !state.key_held.swap(true, Ordering::Relaxed) {
+                                on_toggle(app);
+                            }
+                        }
+                        ShortcutState::Released => {
+                            state.key_held.store(false, Ordering::Relaxed);
+                        }
                     }
                 })
                 .build(),
@@ -140,6 +211,7 @@ pub fn run() {
             app.manage(AppState {
                 recorder: audio::Recorder::new(),
                 stt,
+                key_held: AtomicBool::new(false),
             });
 
             // Push-to-talk global shortcut.
@@ -180,6 +252,7 @@ pub fn run() {
                 }
             }
         })
+        .invoke_handler(tauri::generate_handler![get_settings, save_settings])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

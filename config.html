@@ -15,27 +15,35 @@
       </header>
 
       <section>
-        <h2>Agent</h2>
-        <p class="muted">
-          Z.AI API key, base URL, and model selection will live here (M5).
-        </p>
+        <h2>Agent (Z.AI)</h2>
+        <label>
+          Base URL
+          <input id="base_url" type="text" spellcheck="false" autocomplete="off" />
+        </label>
+        <label>
+          Model
+          <input id="model" type="text" spellcheck="false" autocomplete="off" />
+        </label>
+        <label>
+          API key
+          <input id="api_key" type="password" autocomplete="off" />
+        </label>
+        <button id="save">Save</button>
+        <p class="muted" id="status"></p>
       </section>
 
       <section>
         <h2>Voice</h2>
         <p class="muted">
-          Microphone, speech-to-text engine, and the talk-to-Bit hotkey (M4).
+          Push-to-talk: hold <kbd>⌘⇧Space</kbd>, speak, release. Transcribed
+          locally with Parakeet&nbsp;v2.
         </p>
       </section>
 
       <section>
         <h2>Tools</h2>
-        <p class="muted">
-          Enable the actions Bit can take on your computer (M6).
-        </p>
+        <p class="muted">Actions Bit can take on your computer — coming in M6.</p>
       </section>
-
-      <footer class="muted" id="status">Bit · early build</footer>
     </main>
   </body>
 </html>

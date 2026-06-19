@@ -99,6 +99,10 @@ impl Recorder {
         }
     }
 
+    pub fn is_recording(&self) -> bool {
+        self.recording.load(Ordering::Relaxed)
+    }
+
     pub fn start(&self) {
         // Idempotent: key auto-repeat fires Pressed repeatedly while held, but we
         // only clear the buffer on the transition into recording.
