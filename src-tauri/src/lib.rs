@@ -1,11 +1,34 @@
+mod audio;
+mod stt;
+
+use std::sync::Arc;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Manager, WebviewUrl, WebviewWindowBuilder,
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(target_os = "macos")]
 use tauri::ActivationPolicy;
+
+/// Push-to-talk: hold to record, release to transcribe (Cmd+Shift+Space).
+fn talk_shortcut() -> Shortcut {
+    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)
+}
+
+struct AppState {
+    recorder: audio::Recorder,
+    stt: Arc<stt::Stt>,
+}
+
+/// Tell the Bit overlay to change form/state.
+fn set_bit_state(app: &tauri::AppHandle, state: &str) {
+    if let Some(win) = app.get_webview_window("bit") {
+        let _ = win.emit("bit-state", state);
+    }
+}
 
 /// Open (or focus) the settings window. On macOS we temporarily switch to a
 /// regular activation policy so the window can take focus, then drop back to
@@ -59,14 +82,68 @@ fn spawn_passthrough(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     });
 }
 
+/// Fired on hold (start recording) and release (stop + transcribe) of the
+/// push-to-talk shortcut.
+fn on_talk(app: &tauri::AppHandle, event_state: ShortcutState) {
+    let state = app.state::<AppState>();
+    match event_state {
+        ShortcutState::Pressed => {
+            state.recorder.start();
+            set_bit_state(app, "listening");
+        }
+        ShortcutState::Released => {
+            let (samples, rate) = state.recorder.stop();
+            set_bit_state(app, "thinking");
+            let stt = state.stt.clone();
+            let app = app.clone();
+            std::thread::spawn(move || {
+                let samples_16k = audio::resample_to_16k(&samples, rate);
+                let text = match stt
+                    .ensure_loaded()
+                    .and_then(|_| stt.transcribe(&samples_16k))
+                {
+                    Ok(t) => t.trim().to_string(),
+                    Err(e) => {
+                        eprintln!("[bit] stt error: {e}");
+                        String::new()
+                    }
+                };
+                println!("[bit] heard: {text:?}");
+                let _ = app.emit("transcript", text);
+                set_bit_state(&app, "neutral");
+            });
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if shortcut == &talk_shortcut() {
+                        on_talk(app, event.state());
+                    }
+                })
+                .build(),
+        )
         .setup(|app| {
             // Pure floating pet: no Dock icon, no app menu.
             #[cfg(target_os = "macos")]
             app.set_activation_policy(ActivationPolicy::Accessory);
+
+            // Speech-to-text state (model downloads/loads lazily on first use).
+            let app_data = app.path().app_data_dir()?;
+            let stt = Arc::new(stt::Stt::new(stt::model_dir(&app_data)));
+            app.manage(AppState {
+                recorder: audio::Recorder::new(),
+                stt,
+            });
+
+            // Push-to-talk global shortcut.
+            app.global_shortcut().register(talk_shortcut())?;
 
             // Tray icon is the only chrome: open settings / quit.
             let settings_i =
