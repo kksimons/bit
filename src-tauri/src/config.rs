@@ -3,8 +3,16 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 /// Non-secret settings, persisted as JSON in the app config dir.
+fn default_provider() -> String {
+    "zai".into()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
+    /// "zai" | "anthropic" (Anthropic Messages API) or "openai" | "openrouter"
+    /// (OpenAI Chat Completions API).
+    #[serde(default = "default_provider")]
+    pub provider: String,
     pub base_url: String,
     pub model: String,
     /// When false (default), the model cannot run raw shell/AppleScript — only
@@ -17,6 +25,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            provider: default_provider(),
             base_url: "https://api.z.ai/api/anthropic".into(),
             model: "glm-5.2".into(),
             developer_mode: false,
@@ -73,6 +82,7 @@ pub fn set_key(app: &tauri::AppHandle, key: &str) -> Result<(), String> {
 
 /// Everything the agent needs to make a request. None if no key is configured.
 pub struct AgentConfig {
+    pub provider: String,
     pub base_url: String,
     pub model: String,
     pub api_key: String,
@@ -82,6 +92,7 @@ pub fn load_agent_config(app: &tauri::AppHandle) -> Option<AgentConfig> {
     let s = load_settings(app);
     let api_key = get_key(app)?;
     Some(AgentConfig {
+        provider: s.provider,
         base_url: s.base_url,
         model: s.model,
         api_key,

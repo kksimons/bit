@@ -15,7 +15,16 @@
       </header>
 
       <section>
-        <h2>Agent (Z.AI)</h2>
+        <h2>Agent</h2>
+        <label>
+          Provider
+          <select id="provider">
+            <option value="zai">Z.AI (GLM)</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openai">OpenAI</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+        </label>
         <label>
           Base URL
           <input id="base_url" type="text" spellcheck="false" autocomplete="off" />

@@ -73,7 +73,8 @@ label {
   margin: 10px 0 0;
 }
 
-input {
+input[type="text"],
+input[type="password"] {
   display: block;
   width: 100%;
   margin-top: 4px;
@@ -85,9 +86,17 @@ input {
   font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-input:focus {
+input[type="text"]:focus,
+input[type="password"]:focus {
   outline: none;
   border-color: var(--cyan);
+}
+
+input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--cyan);
+  flex: none;
 }
 
 button {
@@ -167,6 +176,12 @@ select {
   border-radius: 7px;
   color: var(--text);
   font-size: 13px;
+}
+
+#provider {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
 }
 
 label.inline {

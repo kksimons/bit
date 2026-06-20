@@ -38,28 +38,54 @@ const STEP_LABELS: Record<Step["type"], string> = {
 
 // ================= Agent settings =================
 interface SettingsView {
+  provider: string;
   base_url: string;
   model: string;
   has_key: boolean;
   developer_mode: boolean;
 }
 
+const elSel = (id: string) => document.getElementById(id) as HTMLSelectElement;
+
+const PROVIDER_DEFAULTS: Record<string, { base_url: string; model: string; label: string }> = {
+  zai: { base_url: "https://api.z.ai/api/anthropic", model: "glm-5.2", label: "Z.AI" },
+  anthropic: { base_url: "https://api.anthropic.com", model: "claude-sonnet-4-6", label: "Anthropic" },
+  openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o", label: "OpenAI" },
+  openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o", label: "OpenRouter" },
+};
+
 async function loadSettings() {
   const s = await invoke<SettingsView>("get_settings");
+  elSel("provider").value = s.provider;
   elInput("base_url").value = s.base_url;
   elInput("model").value = s.model;
   elInput("api_key").value = "";
+  const label = PROVIDER_DEFAULTS[s.provider]?.label ?? "provider";
   elInput("api_key").placeholder = s.has_key
     ? "•••••••• saved — leave blank to keep"
-    : "paste your Z.AI key";
+    : `paste your ${label} key`;
   elInput("dev_mode").checked = s.developer_mode;
   $("status").textContent = s.has_key ? "Key saved." : "No API key set yet.";
 }
+
+// Switching provider prefills its default endpoint + model (and reminds you the
+// key is per-provider).
+elSel("provider").addEventListener("change", () => {
+  const d = PROVIDER_DEFAULTS[elSel("provider").value];
+  if (d) {
+    elInput("base_url").value = d.base_url;
+    elInput("model").value = d.model;
+    elInput("api_key").value = "";
+    elInput("api_key").placeholder = `paste your ${d.label} key`;
+    $("status").textContent = `Switched to ${d.label} — enter that provider's key and Save.`;
+  }
+});
 
 async function persistSettings(): Promise<boolean> {
   const key = elInput("api_key").value.trim();
   try {
     await invoke("save_settings", {
+      provider: elSel("provider").value,
       baseUrl: elInput("base_url").value.trim(),
       model: elInput("model").value.trim(),
       apiKey: key.length > 0 ? key : null,

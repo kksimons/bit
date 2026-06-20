@@ -37,6 +37,7 @@ struct AppState {
 
 #[derive(serde::Serialize)]
 struct SettingsView {
+    provider: String,
     base_url: String,
     model: String,
     has_key: bool,
@@ -47,6 +48,7 @@ struct SettingsView {
 fn get_settings(app: tauri::AppHandle) -> SettingsView {
     let s = config::load_settings(&app);
     SettingsView {
+        provider: s.provider,
         base_url: s.base_url,
         model: s.model,
         has_key: config::get_key(&app).is_some(),
@@ -57,6 +59,7 @@ fn get_settings(app: tauri::AppHandle) -> SettingsView {
 #[tauri::command]
 fn save_settings(
     app: tauri::AppHandle,
+    provider: String,
     base_url: String,
     model: String,
     api_key: Option<String>,
@@ -65,6 +68,7 @@ fn save_settings(
     config::save_settings(
         &app,
         &config::Settings {
+            provider,
             base_url,
             model,
             developer_mode,
