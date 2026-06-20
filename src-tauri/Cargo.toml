@@ -29,3 +29,7 @@ transcribe-rs = { version = "0.3.11", default-features = false, features = ["onn
 cpal = "0.15"
 ureq = { version = "2", features = ["json"] }
 
+[lints.clippy]
+# `cargo clippy -- -D warnings` (see `bun run lint:rust`) escalates these to errors.
+all = "warn"
+

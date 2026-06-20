@@ -51,7 +51,7 @@
           API key
           <input id="api_key" type="password" autocomplete="off" />
         </label>
-        <button id="save">Save</button>
+        <button type="button" id="save">Save</button>
         <p class="muted" id="status"></p>
       </section>
 
@@ -73,11 +73,11 @@
       <section>
         <h2>Do Not Disturb</h2>
         <div class="row">
-          <button id="dnd_on">Turn On</button>
-          <button id="dnd_off" class="ghost">Turn Off</button>
+          <button type="button" id="dnd_on">Turn On</button>
+          <button type="button" id="dnd_off" class="ghost">Turn Off</button>
         </div>
         <p class="muted" id="dnd_status"></p>
-        <button id="dnd_setup" class="ghost hidden">Set up Do Not Disturb…</button>
+        <button type="button" id="dnd_setup" class="ghost hidden">Set up Do Not Disturb…</button>
         <div id="dnd_help" class="help hidden">
           <p>One-time setup (Apple requires this — Bit can't do it silently):</p>
           <ol>
@@ -86,14 +86,14 @@
             <li>Name it exactly <b>Bit DND On</b>.</li>
             <li>Make a second one: <b>Set Focus → Do Not Disturb → Turn Off</b>, named <b>Bit DND Off</b>.</li>
           </ol>
-          <button id="dnd_recheck" class="ghost">Re-check</button>
+          <button type="button" id="dnd_recheck" class="ghost">Re-check</button>
         </div>
       </section>
 
       <section>
         <div class="row spread">
           <h2>Workflows</h2>
-          <button id="new_workflow">+ New</button>
+          <button type="button" id="new_workflow">+ New</button>
         </div>
         <p class="muted">
           Multi-step routines. Build one here, or just tell Bit: “set up a
@@ -107,7 +107,7 @@
         <div class="editor">
           <div class="row spread">
             <h2 id="editor_title">New workflow</h2>
-            <button id="editor_close" class="ghost">✕</button>
+            <button type="button" id="editor_close" class="ghost">✕</button>
           </div>
           <label>
             Name
@@ -130,12 +130,12 @@
               <option value="delay">Wait</option>
               <option value="applescript">Run AppleScript (advanced)</option>
             </select>
-            <button id="add_step">+ Add step</button>
+            <button type="button" id="add_step">+ Add step</button>
           </div>
 
           <div class="row spread editor_actions">
-            <button id="wf_save">Save workflow</button>
-            <button id="wf_run" class="ghost">Save &amp; Run</button>
+            <button type="button" id="wf_save">Save workflow</button>
+            <button type="button" id="wf_run" class="ghost">Save &amp; Run</button>
           </div>
           <p class="muted" id="editor_status"></p>
         </div>

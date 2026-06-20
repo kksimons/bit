@@ -43,7 +43,7 @@ pub fn definitions(developer_mode: bool) -> Value {
         json!({
             "name": "save_workflow",
             "description": "Draft a named workflow when the user asks you to set up/save a routine. IMPORTANT: drafts are saved DISABLED — tell the user to review and enable it in Settings before it can run. Steps are objects with a \"type\": \
-\"shell\" {command}, \"open_app\" {name}, \"open_url\" {url}, \"applescript\" {script}, \"focus\" {enabled:bool}, \"delay\" {ms:number}, or \"ghostty\" {tabs:[{dir, command?, title?}]}.",
+        \"shell\" {command}, \"open_app\" {name}, \"open_url\" {url}, \"applescript\" {script}, \"focus\" {enabled:bool}, \"delay\" {ms:number}, or \"ghostty\" {tabs:[{dir, command?, title?}]}.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -122,10 +122,9 @@ pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<Stri
             crate::motion::shoo(&win)
         }
         "open_terminal_tabs" => {
-            let tabs: Vec<GhosttyTab> = serde_json::from_value(
-                input.get("tabs").cloned().ok_or("missing tabs")?,
-            )
-            .map_err(|e| format!("bad tabs: {e}"))?;
+            let tabs: Vec<GhosttyTab> =
+                serde_json::from_value(input.get("tabs").cloned().ok_or("missing tabs")?)
+                    .map_err(|e| format!("bad tabs: {e}"))?;
             workflows::run_ghostty(&tabs)
         }
         "list_workflows" => {
@@ -142,10 +141,9 @@ pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<Stri
         }
         "save_workflow" => {
             let name = arg("name").ok_or("missing name")?;
-            let steps: Vec<Step> = serde_json::from_value(
-                input.get("steps").cloned().ok_or("missing steps")?,
-            )
-            .map_err(|e| format!("bad steps: {e}"))?;
+            let steps: Vec<Step> =
+                serde_json::from_value(input.get("steps").cloned().ok_or("missing steps")?)
+                    .map_err(|e| format!("bad steps: {e}"))?;
             let trigger_phrases: Vec<String> = input
                 .get("trigger_phrases")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())

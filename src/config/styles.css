@@ -149,6 +149,7 @@ kbd {
 }
 
 .hidden {
+  /* biome-ignore lint/complexity/noImportantStyles: .hidden must override every display rule (e.g. .backdrop uses display:flex) so it always hides */
   display: none !important;
 }
 

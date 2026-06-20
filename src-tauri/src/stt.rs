@@ -4,8 +4,7 @@ use std::sync::Mutex;
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
-const HF_BASE: &str =
-    "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main";
+const HF_BASE: &str = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main";
 const FILES: [&str; 4] = [
     "encoder-model.int8.onnx",
     "decoder_joint-model.int8.onnx",
@@ -66,8 +65,8 @@ impl Stt {
         let mut guard = self.model.lock().unwrap();
         if guard.is_none() {
             println!("[bit] loading Parakeet model …");
-            let model = ParakeetModel::load(&self.dir, &Quantization::Int8)
-                .map_err(|e| e.to_string())?;
+            let model =
+                ParakeetModel::load(&self.dir, &Quantization::Int8).map_err(|e| e.to_string())?;
             *guard = Some(model);
             println!("[bit] model loaded");
         }

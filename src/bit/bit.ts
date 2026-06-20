@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { buildGeometry, COLORS, type BitState } from "./shapes";
+import { type BitState, buildGeometry, COLORS } from "./shapes";
 
 const ROTATION_SPEED: Record<BitState, number> = {
   neutral: 0.008,
@@ -95,10 +95,7 @@ export class Bit {
     }
     this.transition = { active: true, t: 0, to: state, swapped: false };
     if (revertMs > 0 && (state === "yes" || state === "no")) {
-      this.revertTimer = window.setTimeout(
-        () => this.setState("neutral", 0),
-        revertMs,
-      );
+      this.revertTimer = window.setTimeout(() => this.setState("neutral", 0), revertMs);
     }
   }
 

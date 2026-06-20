@@ -1,9 +1,10 @@
-import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { Bit } from "./bit/bit";
 import type { BitState } from "./bit/shapes";
 
-const canvas = document.querySelector<HTMLCanvasElement>("#bit-canvas")!;
+const canvas = document.querySelector<HTMLCanvasElement>("#bit-canvas");
+if (!canvas) throw new Error("#bit-canvas not found");
 const bit = new Bit(canvas);
 
 // Backend drives the Bit's form (listening / thinking / neutral).

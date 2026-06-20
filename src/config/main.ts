@@ -23,7 +23,11 @@ interface Workflow {
   steps: Step[];
 }
 
-const $ = (id: string) => document.getElementById(id)!;
+const $ = (id: string) => {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`element #${id} not found`);
+  return el;
+};
 const elInput = (id: string) => $(id) as HTMLInputElement;
 
 const STEP_LABELS: Record<Step["type"], string> = {
@@ -50,9 +54,17 @@ const elSel = (id: string) => document.getElementById(id) as HTMLSelectElement;
 
 const PROVIDER_DEFAULTS: Record<string, { base_url: string; model: string; label: string }> = {
   zai: { base_url: "https://api.z.ai/api/anthropic", model: "glm-5.2", label: "Z.AI" },
-  anthropic: { base_url: "https://api.anthropic.com", model: "claude-sonnet-4-6", label: "Anthropic" },
+  anthropic: {
+    base_url: "https://api.anthropic.com",
+    model: "claude-sonnet-4-6",
+    label: "Anthropic",
+  },
   openai: { base_url: "https://api.openai.com/v1", model: "gpt-4o", label: "OpenAI" },
-  openrouter: { base_url: "https://openrouter.ai/api/v1", model: "openai/gpt-4o", label: "OpenRouter" },
+  openrouter: {
+    base_url: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-4o",
+    label: "OpenRouter",
+  },
 };
 
 async function loadSettings() {
@@ -142,9 +154,7 @@ sizeInput.addEventListener("change", () => {
 // ================= Do Not Disturb =================
 async function refreshDnd() {
   const ready = await invoke<boolean>("dnd_status").catch(() => false);
-  $("dnd_status").textContent = ready
-    ? "Ready."
-    : "Not set up yet — one-time setup needed.";
+  $("dnd_status").textContent = ready ? "Ready." : "Not set up yet — one-time setup needed.";
   $("dnd_setup").classList.toggle("hidden", ready);
   if (ready) $("dnd_help").classList.add("hidden");
 }
@@ -192,20 +202,20 @@ async function loadWorkflows() {
         <button class="edit ghost">Edit</button>
         <button class="del ghost danger">Delete</button>
       </div>`;
-    card.querySelector<HTMLInputElement>(".switch input")!.addEventListener("change", async (e) => {
+    card.querySelector<HTMLInputElement>(".switch input")?.addEventListener("change", async (e) => {
       wf.enabled = (e.target as HTMLInputElement).checked;
       await invoke("save_workflow", { workflow: wf }).catch(() => {});
       await loadWorkflows();
     });
-    card.querySelector(".run")!.addEventListener("click", async () => {
+    card.querySelector(".run")?.addEventListener("click", async () => {
       try {
         await invoke("run_workflow", { name: wf.name });
       } catch (e) {
         alert(`Run failed: ${e}`);
       }
     });
-    card.querySelector(".edit")!.addEventListener("click", () => openEditor(wf));
-    card.querySelector(".del")!.addEventListener("click", async () => {
+    card.querySelector(".edit")?.addEventListener("click", () => openEditor(wf));
+    card.querySelector(".del")?.addEventListener("click", async () => {
       if (confirm(`Delete "${wf.name}"?`)) {
         await invoke("delete_workflow", { name: wf.name }).catch(() => {});
         await loadWorkflows();
@@ -277,7 +287,9 @@ function renderSteps() {
   const root = $("steps");
   root.innerHTML = "";
   if (!editing) return;
-  editing.steps.forEach((step, i) => root.appendChild(stepRow(step, i)));
+  editing.steps.forEach((step, i) => {
+    root.appendChild(stepRow(step, i));
+  });
 }
 
 function stepRow(step: Step, index: number): HTMLElement {
@@ -319,7 +331,7 @@ function buildStepFields(step: Step, body: HTMLElement) {
       break;
     case "delay":
       body.appendChild(
-        textField("Milliseconds", String(step.ms), (v) => (step.ms = parseInt(v) || 0)),
+        textField("Milliseconds", String(step.ms), (v) => (step.ms = parseInt(v, 10) || 0)),
       );
       break;
     case "focus": {

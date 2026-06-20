@@ -55,7 +55,12 @@ pub fn shoo(win: &WebviewWindow) -> Result<String, String> {
 }
 
 /// Smooth ease-out slide from `from` to `to`.
-fn animate_to(win: &WebviewWindow, from: PhysicalPosition<i32>, to: PhysicalPosition<i32>, steps: u32) {
+fn animate_to(
+    win: &WebviewWindow,
+    from: PhysicalPosition<i32>,
+    to: PhysicalPosition<i32>,
+    steps: u32,
+) {
     for i in 1..=steps {
         let t = i as f64 / steps as f64;
         let e = 1.0 - (1.0 - t).powi(3); // ease-out cubic

@@ -10,16 +10,30 @@ use tauri::Manager;
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Step {
-    Shell { command: String },
-    OpenApp { name: String },
-    OpenUrl { url: String },
-    AppleScript { script: String },
+    Shell {
+        command: String,
+    },
+    OpenApp {
+        name: String,
+    },
+    OpenUrl {
+        url: String,
+    },
+    AppleScript {
+        script: String,
+    },
     /// Open one Ghostty window with these tabs.
-    Ghostty { tabs: Vec<GhosttyTab> },
+    Ghostty {
+        tabs: Vec<GhosttyTab>,
+    },
     /// Toggle Do Not Disturb.
-    Focus { enabled: bool },
+    Focus {
+        enabled: bool,
+    },
     /// Pause between steps (e.g. let OrbStack finish booting).
-    Delay { ms: u64 },
+    Delay {
+        ms: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -100,7 +114,10 @@ fn new_id(name: &str) -> String {
 /// Create or update a workflow, matched by case-insensitive name.
 pub fn upsert(app: &tauri::AppHandle, mut wf: Workflow) -> Result<Workflow, String> {
     let mut all = load_all(app);
-    if let Some(existing) = all.iter_mut().find(|w| w.name.eq_ignore_ascii_case(&wf.name)) {
+    if let Some(existing) = all
+        .iter_mut()
+        .find(|w| w.name.eq_ignore_ascii_case(&wf.name))
+    {
         wf.id = existing.id.clone();
         *existing = wf.clone();
     } else {
@@ -151,7 +168,11 @@ pub fn run(wf: &Workflow) -> Result<String, String> {
         };
         result.map_err(|e| format!("step {} ({}) failed: {e}", i + 1, step_kind(step)))?;
     }
-    Ok(format!("ran workflow '{}' ({} steps)", wf.name, wf.steps.len()))
+    Ok(format!(
+        "ran workflow '{}' ({} steps)",
+        wf.name,
+        wf.steps.len()
+    ))
 }
 
 // ---- Ghostty multi-tab via native AppleScript (Ghostty >= 1.3) ----

@@ -446,8 +446,7 @@ pub fn run() {
             app.global_shortcut().register(talk_shortcut())?;
 
             // Tray icon is the only chrome: open settings / quit.
-            let settings_i =
-                MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
+            let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit Bit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&settings_i, &quit_i])?;
 

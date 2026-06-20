@@ -23,8 +23,7 @@ function pseudoRandom(n: THREE.Vector3): number {
   return s - Math.floor(s);
 }
 
-const keyOf = (v: THREE.Vector3) =>
-  `${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)}`;
+const keyOf = (v: THREE.Vector3) => `${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)}`;
 
 /**
  * Stellate a convex polyhedron: replace each (coplanar) face with a pyramid
@@ -79,10 +78,7 @@ export function stellate(
     const centroid = new THREE.Vector3();
     let count = 0;
     // boundary edges appear in exactly one triangle of the face group
-    const edges = new Map<
-      string,
-      { count: number; a: THREE.Vector3; b: THREE.Vector3 }
-    >();
+    const edges = new Map<string, { count: number; a: THREE.Vector3; b: THREE.Vector3 }>();
 
     for (const t of face.tris) {
       const tv = [
@@ -116,11 +112,7 @@ export function stellate(
 
     for (const edge of edges.values()) {
       if (edge.count !== 1) continue; // interior edge, skip
-      out.push(
-        edge.a.x, edge.a.y, edge.a.z,
-        edge.b.x, edge.b.y, edge.b.z,
-        apex.x, apex.y, apex.z,
-      );
+      out.push(edge.a.x, edge.a.y, edge.a.z, edge.b.x, edge.b.y, edge.b.z, apex.x, apex.y, apex.z);
     }
   }
 

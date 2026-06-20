@@ -47,7 +47,8 @@ fn workflows_context(app: &tauri::AppHandle) -> String {
     if enabled.is_empty() {
         return "\n\nThe user has no enabled workflows yet.".into();
     }
-    let mut s = String::from("\n\nSaved workflows you can run (call run_workflow with the exact name):");
+    let mut s =
+        String::from("\n\nSaved workflows you can run (call run_workflow with the exact name):");
     for w in enabled {
         let triggers = if w.trigger_phrases.is_empty() {
             String::new()
@@ -60,7 +61,11 @@ fn workflows_context(app: &tauri::AppHandle) -> String {
 }
 
 /// Returns (verdict, times): true=yes/false=no, repeated 1..=3 for emphasis.
-pub fn ask(app: &tauri::AppHandle, cfg: &AgentConfig, transcript: &str) -> Result<(bool, u8), String> {
+pub fn ask(
+    app: &tauri::AppHandle,
+    cfg: &AgentConfig,
+    transcript: &str,
+) -> Result<(bool, u8), String> {
     let dev = crate::config::load_settings(app).developer_mode;
     let tools = tools::definitions(dev);
     if is_openai(&cfg.provider) {
@@ -153,7 +158,10 @@ fn ask_anthropic(
 fn openai_headers(cfg: &AgentConfig) -> Vec<(String, String)> {
     let mut h = vec![("authorization".into(), format!("Bearer {}", cfg.api_key))];
     if cfg.provider == "openrouter" {
-        h.push(("http-referer".into(), "https://github.com/kksimons/bit".into()));
+        h.push((
+            "http-referer".into(),
+            "https://github.com/kksimons/bit".into(),
+        ));
         h.push(("x-title".into(), "Bit".into()));
     }
     h
@@ -253,9 +261,10 @@ fn post(url: &str, headers: &[(String, String)], body: Value) -> Result<Value, S
     }
     match req.send_json(body) {
         Ok(r) => r.into_json().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(code, r)) => {
-            Err(format!("HTTP {code}: {}", r.into_string().unwrap_or_default()))
-        }
+        Err(ureq::Error::Status(code, r)) => Err(format!(
+            "HTTP {code}: {}",
+            r.into_string().unwrap_or_default()
+        )),
         Err(e) => Err(e.to_string()),
     }
 }
