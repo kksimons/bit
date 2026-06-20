@@ -493,7 +493,275 @@ function escapeHtml(s: string): string {
   return d.innerHTML;
 }
 
+// ================= MCP connections =================
+// Gallery-first UX: preset buttons (Gmail, …) that only need a credential,
+// with a raw stdio editor hidden under “Advanced” for power users.
+
+interface PresetFieldView {
+  env_key: string;
+  label: string;
+  placeholder: string;
+  secret: boolean;
+}
+interface PresetView {
+  id: string;
+  label: string;
+  description: string;
+  command: string;
+  args: string[];
+  fields: PresetFieldView[];
+}
+interface McpServerView {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  preset: string;
+  connected: boolean;
+  tool_count: number;
+  error: string | null;
+}
+interface McpServer {
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  preset: string;
+}
+
+let presets: PresetView[] = [];
+/// The preset the credential editor is collecting fields for (null when closed).
+let editingPreset: PresetView | null = null;
+
+async function loadPresets() {
+  presets = await invoke<PresetView[]>("get_mcp_presets").catch(() => []);
+  renderPresets();
+}
+
+function renderPresets() {
+  const root = $("mcp_presets");
+  root.innerHTML = "";
+  // Only show presets the user hasn’t added yet (avoid duplicate connections).
+  const added = new Set(mcpServers.map((s) => s.preset));
+  for (const p of presets) {
+    if (added.has(p.id)) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "preset-btn";
+    btn.innerHTML = `+ ${escapeHtml(p.label)}<span class="preset-desc">${escapeHtml(p.description)}</span>`;
+    btn.addEventListener("click", () => openPresetEditor(p));
+    root.appendChild(btn);
+  }
+}
+
+let mcpServers: McpServerView[] = [];
+
+async function loadMcpServers() {
+  mcpServers = await invoke<McpServerView[]>("get_mcp_servers").catch(() => []);
+  renderMcpServers();
+  renderPresets();
+}
+
+function renderMcpServers() {
+  const root = $("mcp_list");
+  root.innerHTML = "";
+  if (mcpServers.length === 0) return;
+  for (const s of mcpServers) {
+    const card = document.createElement("div");
+    card.className = "conn-card";
+    const status = s.connected
+      ? `<span class="conn-status ok">Connected · ${s.tool_count} tools</span>`
+      : s.error
+        ? `<span class="conn-status err">${escapeHtml(s.error)}</span>`
+        : `<span class="conn-status pending">Not connected</span>`;
+    card.innerHTML = `
+      <div class="row spread">
+        <b>${escapeHtml(s.name)}</b>
+        <label class="switch"><input type="checkbox" ${s.enabled ? "checked" : ""}/> on</label>
+      </div>
+      <div class="conn-status">${status}</div>
+      <div class="row">
+        <button class="test ghost">Test connection</button>
+        <button class="del ghost danger">Remove</button>
+      </div>`;
+
+    card.querySelector<HTMLInputElement>(".switch input")?.addEventListener("change", async (e) => {
+      const enabled = (e.target as HTMLInputElement).checked;
+      await invoke<McpServerView>("save_mcp_server", {
+        server: { ...toServer(s), enabled },
+      }).catch(() => {});
+      await loadMcpServers();
+    });
+    card.querySelector(".test")?.addEventListener("click", async (el) => {
+      const btn = el.currentTarget as HTMLButtonElement;
+      btn.disabled = true;
+      btn.textContent = "Testing…";
+      try {
+        await invoke<number>("test_mcp_server", { name: s.name });
+      } catch {
+        // status refresh will surface the error message
+      }
+      btn.disabled = false;
+      btn.textContent = "Test connection";
+      await loadMcpServers();
+    });
+    card.querySelector(".del")?.addEventListener("click", async () => {
+      if (confirm(`Remove the ${s.name} connection?`)) {
+        await invoke("delete_mcp_server", { name: s.name }).catch(() => {});
+        await loadMcpServers();
+      }
+    });
+    root.appendChild(card);
+  }
+}
+
+/// Flatten a server view back into the persistable shape (drops transient status).
+function toServer(s: McpServerView): McpServer {
+  return {
+    name: s.name,
+    command: s.command,
+    args: s.args,
+    env: s.env,
+    enabled: s.enabled,
+    preset: s.preset,
+  };
+}
+
+function openPresetEditor(p: PresetView) {
+  editingPreset = p;
+  $("mcp_editor_title").textContent = `Add ${p.label}`;
+  $("mcp_editor_desc").textContent = p.description;
+  $("mcp_editor_status").textContent = "";
+  // Render the credential fields the preset needs.
+  const fields = $("mcp_fields");
+  fields.innerHTML = "";
+  for (const f of p.fields) {
+    const wrap = document.createElement("label");
+    wrap.textContent = f.label;
+    const input = document.createElement("input");
+    input.type = f.secret ? "password" : "text";
+    input.dataset.envKey = f.env_key;
+    input.placeholder = f.placeholder;
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    wrap.appendChild(input);
+    fields.appendChild(wrap);
+  }
+  // Show per-preset help (currently Gmail only).
+  $("mcp_help_gmail").classList.toggle("hidden", p.id !== "gmail");
+  $("mcp_editor_backdrop").classList.remove("hidden");
+}
+
+function closePresetEditor() {
+  editingPreset = null;
+  $("mcp_editor_backdrop").classList.add("hidden");
+}
+
+async function savePreset() {
+  if (!editingPreset) return;
+  const env: Record<string, string> = {};
+  let missing = false;
+  for (const f of editingPreset.fields) {
+    const input = $("mcp_fields").querySelector<HTMLInputElement>(`[data-env-key="${f.env_key}"]`);
+    const val = input?.value.trim() ?? "";
+    if (!val) missing = true;
+    env[f.env_key] = val;
+  }
+  if (missing) {
+    $("mcp_editor_status").textContent = "Please fill in all fields.";
+    return;
+  }
+  const server: McpServer = {
+    name: editingPreset.id,
+    command: editingPreset.command,
+    args: editingPreset.args,
+    env,
+    enabled: true,
+    preset: editingPreset.id,
+  };
+  $("mcp_editor_status").textContent = "Connecting…";
+  try {
+    await invoke("save_mcp_server", { server });
+    await loadMcpServers();
+    closePresetEditor();
+  } catch (e) {
+    $("mcp_editor_status").textContent = `Error: ${e}`;
+  }
+}
+
+$("mcp_save").addEventListener("click", savePreset);
+$("mcp_cancel").addEventListener("click", closePresetEditor);
+$("mcp_editor_close").addEventListener("click", closePresetEditor);
+
+// Advanced: custom stdio server. Split the args + env text fields into arrays/map.
+$("mcp_custom_add")?.addEventListener("click", async () => {
+  const name = elInput("mcp_custom_name").value.trim();
+  const command = elInput("mcp_custom_command").value.trim();
+  const argsText = elInput("mcp_custom_args").value.trim();
+  const envText = ($("mcp_custom_env") as HTMLTextAreaElement).value.trim();
+  const status = $("mcp_custom_status");
+  if (!name || !command) {
+    status.textContent = "Name and command are required.";
+    return;
+  }
+  const env: Record<string, string> = {};
+  for (const line of envText.split("\n")) {
+    const i = line.indexOf("=");
+    if (i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1);
+  }
+  const server: McpServer = {
+    name,
+    command,
+    args: argsText ? argsText.split(/\s+/) : [],
+    env,
+    enabled: true,
+    preset: "",
+  };
+  status.textContent = "Connecting…";
+  try {
+    await invoke("save_mcp_server", { server });
+    elInput("mcp_custom_name").value = "";
+    elInput("mcp_custom_command").value = "";
+    elInput("mcp_custom_args").value = "";
+    ($("mcp_custom_env") as HTMLTextAreaElement).value = "";
+    status.textContent = "Added. See the connection status above.";
+    await loadMcpServers();
+  } catch (e) {
+    status.textContent = `Error: ${e}`;
+  }
+});
+
+// ================= Launch on startup =================
+// The backend wraps the autostart plugin in its own commands so it can refuse in
+// dev builds (the debug binary can’t find its UI after a reboot). Nothing to
+// persist — the OS registration is the source of truth.
+async function loadAutostart() {
+  try {
+    elInput("autostart").checked = await invoke<boolean>("autostart_state");
+  } catch (e) {
+    // Reading can’t fail in a way the user needs to know about; just log it.
+    console.warn("[bit] autostart state unavailable:", e);
+  }
+}
+
+elInput("autostart")?.addEventListener("change", async () => {
+  const on = elInput("autostart").checked;
+  try {
+    await invoke("set_autostart", { enabled: on });
+  } catch (e) {
+    elInput("autostart").checked = !on; // revert on failure
+    // The dev-build refusal message is actionable — show it as an alert so it
+    // isn’t lost in the console.
+    alert(`${e}`);
+  }
+});
+
 // ================= init =================
 void loadSettings();
 void refreshDnd();
 void loadWorkflows();
+void loadPresets();
+void loadMcpServers();
+void loadAutostart();

@@ -15,6 +15,15 @@
       </header>
 
       <section>
+        <h2>General</h2>
+        <label class="inline">
+          <input type="checkbox" id="autostart" />
+          Launch Bit when you sign in
+        </label>
+        <p class="muted">Opens Bit automatically each time you start your Mac.</p>
+      </section>
+
+      <section>
         <h2>Appearance</h2>
         <label>
           Bit size
@@ -89,6 +98,73 @@
           <button type="button" id="dnd_recheck" class="ghost">Re-check</button>
         </div>
       </section>
+
+      <section>
+        <h2>Connections</h2>
+        <p class="muted">
+          Let Bit reach into other apps to answer questions like “do I have unread
+          mail?”. Add a connection below and sign in or paste a token — Bit gets
+          that app’s tools automatically.
+        </p>
+        <div id="mcp_presets" class="row"></div>
+        <div id="mcp_list"></div>
+        <details class="advanced">
+          <summary class="muted small">Advanced — add a custom MCP server</summary>
+          <p class="muted small">
+            For any stdio MCP server you run yourself. You’ll need its command,
+            args, and any environment variables.
+          </p>
+          <label>
+            Name
+            <input id="mcp_custom_name" type="text" placeholder="e.g. my-server" />
+          </label>
+          <label>
+            Command
+            <input id="mcp_custom_command" type="text" placeholder="npx" />
+          </label>
+          <label>
+            Args (space-separated)
+            <input id="mcp_custom_args" type="text" placeholder="-y @some/mcp-server" />
+          </label>
+          <label>
+            Environment (one KEY=value per line)
+            <textarea id="mcp_custom_env" rows="3" placeholder="API_KEY=sk-...&#10;NODE_ENV=production"></textarea>
+          </label>
+          <button type="button" id="mcp_custom_add" class="ghost">Add custom server</button>
+          <p class="muted" id="mcp_custom_status"></p>
+        </details>
+      </section>
+
+      <!-- MCP credential editor (shown when adding a preset connection) -->
+      <div id="mcp_editor_backdrop" class="backdrop hidden">
+        <div class="editor">
+          <div class="row spread">
+            <h2 id="mcp_editor_title">Add connection</h2>
+            <button type="button" id="mcp_editor_close" class="ghost">✕</button>
+          </div>
+          <p class="muted" id="mcp_editor_desc"></p>
+          <div id="mcp_fields"></div>
+          <div id="mcp_help_gmail" class="help hidden">
+            <p>Get your Gmail App Password (about a minute, no OAuth or setup app):</p>
+            <ol>
+              <li>Open your <b>Google Account</b> → <b>Security</b>.</li>
+              <li>Turn on <b>2-Step Verification</b> if it isn’t already (required).</li>
+              <li>Open <b>App Passwords</b> (under Security).</li>
+              <li>Choose <b>Mail</b> + any device, then <b>Create</b>.</li>
+              <li>Copy the <b>16-character</b> password and paste it above.</li>
+            </ol>
+            <p class="muted small">
+              The password is stored locally on your Mac (never sent anywhere but
+              Google). It can be revoked anytime from the same Google Account page.
+            </p>
+          </div>
+          <div class="row spread editor_actions">
+            <button type="button" id="mcp_save">Connect</button>
+            <button type="button" id="mcp_cancel" class="ghost">Cancel</button>
+          </div>
+          <p class="muted" id="mcp_editor_status"></p>
+        </div>
+      </div>
 
       <section>
         <div class="row spread">

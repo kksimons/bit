@@ -2,7 +2,7 @@ use crate::config::AgentConfig;
 use crate::{tools, workflows};
 use serde_json::{json, Value};
 
-const SYSTEM: &str = "You are Bit, a desktop companion modeled on the Bit from the film TRON. \
+const SYSTEM: &str = "You are Bit, a desktop companion: a floating geometric polyhedron. \
 Act on the user's Mac using the tools available to you (run their saved workflows, open apps and \
 URLs, toggle Focus/Do Not Disturb, and — if enabled — other actions). When the user asks for \
 something, DO it by calling the appropriate tool(s) before answering. \
@@ -67,7 +67,11 @@ pub fn ask(
     transcript: &str,
 ) -> Result<(bool, u8), String> {
     let dev = crate::config::load_settings(app).developer_mode;
-    let tools = tools::definitions(dev);
+    let mut tools = tools::definitions(dev);
+    // Merge in any enabled MCP servers' tools (namespaced mcp__<server>__<tool>).
+    if let Some(arr) = tools.as_array_mut() {
+        arr.extend(crate::mcp::tool_defs(app));
+    }
     if is_openai(&cfg.provider) {
         ask_openai(app, cfg, transcript, &to_openai_tools(&tools))
     } else {

@@ -1,6 +1,7 @@
 mod agent;
 mod audio;
 mod config;
+mod mcp;
 mod motion;
 mod stt;
 mod tools;
@@ -15,6 +16,7 @@ use tauri::{
     tray::TrayIconBuilder,
     Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[cfg(target_os = "macos")]
@@ -37,6 +39,8 @@ struct AppState {
     last_toggle: Mutex<Instant>,
     /// Set while the user is dragging the Bit (pauses the click-through poller).
     dragging: Arc<AtomicBool>,
+    /// Live MCP server connections, keyed by server name.
+    mcp: mcp::Registry,
 }
 
 #[derive(serde::Serialize)]
@@ -208,6 +212,182 @@ fn end_drag(app: tauri::AppHandle) {
     app.state::<AppState>()
         .dragging
         .store(false, Ordering::Relaxed);
+}
+
+// ---- MCP (external tool servers) ----
+
+/// All configured MCP servers + their live connection status, for the UI.
+#[derive(serde::Serialize)]
+struct McpServerView {
+    name: String,
+    command: String,
+    args: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
+    enabled: bool,
+    preset: String,
+    connected: bool,
+    tool_count: usize,
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn get_mcp_servers(app: tauri::AppHandle) -> Vec<McpServerView> {
+    let registry = app.state::<AppState>().mcp.clone();
+    mcp::load_all(&app)
+        .into_iter()
+        .map(|s| {
+            let connected = registry.is_connected(&s.name);
+            McpServerView {
+                tool_count: if connected {
+                    registry.tool_count(&s)
+                } else {
+                    0
+                },
+                connected,
+                error: registry.last_error(&s.name),
+                name: s.name.clone(),
+                command: s.command,
+                args: s.args,
+                env: s.env,
+                enabled: s.enabled,
+                preset: s.preset,
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn save_mcp_server(
+    app: tauri::AppHandle,
+    server: mcp::McpServer,
+) -> Result<mcp::McpServer, String> {
+    app.state::<AppState>().mcp.invalidate(&server.name);
+    let saved = mcp::upsert(&app, server)?;
+    // If enabled, start warming the (new) connection now.
+    if saved.enabled {
+        spawn_mcp_prewarm(app.clone());
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+fn delete_mcp_server(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    app.state::<AppState>().mcp.invalidate(&name);
+    mcp::delete(&app, &name)
+}
+
+/// Probe one server: connect now, run tools/list, and report status. Lets the
+/// UI show “connected · N tools” on demand (and after the user pastes a token).
+#[tauri::command]
+fn test_mcp_server(app: tauri::AppHandle, name: String) -> Result<usize, String> {
+    let server = mcp::load_all(&app)
+        .into_iter()
+        .find(|s| s.name.eq_ignore_ascii_case(&name))
+        .ok_or_else(|| format!("no MCP server named '{name}'"))?;
+    if !server.enabled {
+        return Err("server is disabled".into());
+    }
+    // Force a fresh connect attempt (drops any cached error).
+    app.state::<AppState>().mcp.invalidate(&name);
+    app.state::<AppState>().mcp.ensure(&server).map(|t| t.len())
+}
+
+/// One credential field a preset asks the UI to collect.
+#[derive(serde::Serialize)]
+struct PresetFieldView {
+    env_key: String,
+    label: String,
+    placeholder: String,
+    secret: bool,
+}
+
+/// Gallery presets the UI renders as one-click “Add X” buttons.
+#[derive(serde::Serialize)]
+struct PresetView {
+    id: String,
+    label: String,
+    description: String,
+    command: String,
+    args: Vec<String>,
+    fields: Vec<PresetFieldView>,
+}
+
+#[tauri::command]
+fn get_mcp_presets() -> Vec<PresetView> {
+    mcp::presets()
+        .iter()
+        .map(|p| PresetView {
+            id: p.id.into(),
+            label: p.label.into(),
+            description: p.description.into(),
+            command: p.command.into(),
+            args: p.args.iter().map(|s| (*s).into()).collect(),
+            fields: p
+                .fields
+                .iter()
+                .map(|f| PresetFieldView {
+                    env_key: f.env_key.into(),
+                    label: f.label.into(),
+                    placeholder: f.placeholder.into(),
+                    secret: f.secret,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Background-warm every enabled MCP server. Safe to call repeatedly; already-
+/// connected servers are no-ops. Runs off the calling thread so it never blocks
+/// the UI or the agent loop.
+fn spawn_mcp_prewarm(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let registry = app.state::<AppState>().mcp.clone();
+        for server in mcp::load_all(&app) {
+            if !server.enabled {
+                continue;
+            }
+            if let Err(e) = registry.ensure(&server) {
+                eprintln!("[bit] mcp '{}': {e}", server.name);
+            }
+        }
+    });
+}
+
+// ---- Launch on startup ----
+//
+// We wrap the autostart plugin in our own commands rather than letting the
+// frontend call it directly, so we can refuse in development builds. Registering
+// a login item that points at `target/debug/bit` is a footgun: that binary loads
+// its UI from the Vite dev server, which isn't running after a reboot — so the
+// app starts to a blank screen. Force users onto a real `tauri build` install.
+
+/// Read whether launch-on-login is currently registered with the OS.
+#[tauri::command]
+fn autostart_state(app: tauri::AppHandle) -> bool {
+    // Reading is always safe — it just inspects the existing login item.
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// Register or unregister Bit as a login item. Refuses in debug builds.
+#[tauri::command]
+fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    // `cfg!(debug_assertions)` is a const bool: true under `tauri dev` (debug
+    // profile), false under `tauri build` (release). It compiles out cleanly and
+    // is far more reliable than sniffing current_exe().
+    if cfg!(debug_assertions) {
+        return Err(
+            "Launch on startup is disabled in development builds — the dev binary \
+             can’t find its UI after a reboot. Build and install the app first: \
+             `bun run tauri build`, then open the resulting .app and re-enable this."
+                .into(),
+        );
+    }
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| e.to_string())
+    } else {
+        mgr.disable().map_err(|e| e.to_string())
+    }
 }
 
 /// Tell the Bit overlay to change form/state.
@@ -404,6 +584,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -440,7 +624,13 @@ pub fn run() {
                 stt,
                 last_toggle: Mutex::new(Instant::now()),
                 dragging: dragging.clone(),
+                mcp: mcp::Registry::new(),
             });
+
+            // Pre-warm enabled MCP servers in the background so the first voice
+            // request doesn't stall on npx cold-start. Failures are non-fatal —
+            // the server just contributes no tools until it connects.
+            spawn_mcp_prewarm(app.handle().clone());
 
             // Push-to-talk global shortcut.
             app.global_shortcut().register(talk_shortcut())?;
@@ -493,7 +683,14 @@ pub fn run() {
             set_dnd,
             setup_dnd,
             start_drag,
-            end_drag
+            end_drag,
+            get_mcp_servers,
+            save_mcp_server,
+            delete_mcp_server,
+            test_mcp_server,
+            get_mcp_presets,
+            autostart_state,
+            set_autostart
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

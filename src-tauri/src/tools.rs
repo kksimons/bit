@@ -91,6 +91,11 @@ fn developer_mode(app: &tauri::AppHandle) -> bool {
 
 /// Execute a tool call and return text output (or an error string).
 pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<String, String> {
+    // MCP tools are namespaced mcp__<server>__<tool> and routed to the client.
+    if name.starts_with("mcp__") {
+        return crate::mcp::call(app, name, input);
+    }
+
     let arg = |key: &str| input.get(key).and_then(|v| v.as_str()).map(str::to_owned);
 
     // Raw-execution tools are only available in Developer mode.

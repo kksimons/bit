@@ -23,8 +23,7 @@ interface Transition {
 /**
  * Renders the Bit: a flat-shaded emissive polyhedron on a transparent canvas.
  * Form changes contract to a flicker, swap geometry at the smallest point, then
- * expand back out — the same symmetric motion in both directions, matching how
- * the film Bit re-forms.
+ * expand back out — the same symmetric motion in both directions.
  */
 export class Bit {
   private renderer: THREE.WebGLRenderer;

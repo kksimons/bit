@@ -7,7 +7,7 @@ export interface BitPalette {
   emissive: number;
 }
 
-// Canonical TRON (1982) Bit colors.
+// Bit's per-state colors.
 export const COLORS: Record<BitState, BitPalette> = {
   neutral: { color: 0x00ddff, emissive: 0x0a7d96 },
   listening: { color: 0x46e8ff, emissive: 0x179fbe },
