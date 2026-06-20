@@ -7,6 +7,12 @@ fn default_provider() -> String {
     "zai".into()
 }
 
+/// Bit window size scale: 1.0 = the default 260px square. Slider range is
+/// 0.5–2.0, applied live by resizing the transparent overlay.
+fn default_size() -> f64 {
+    1.0
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     /// "zai" | "anthropic" (Anthropic Messages API) or "openai" | "openrouter"
@@ -20,6 +26,9 @@ pub struct Settings {
     /// are re-enabled for power users who accept the risk.
     #[serde(default)]
     pub developer_mode: bool,
+    /// On-screen size multiplier for the Bit (0.5–2.0). Resizes the overlay.
+    #[serde(default = "default_size")]
+    pub size: f64,
 }
 
 impl Default for Settings {
@@ -29,6 +38,7 @@ impl Default for Settings {
             base_url: "https://api.z.ai/api/anthropic".into(),
             model: "glm-5.2".into(),
             developer_mode: false,
+            size: default_size(),
         }
     }
 }

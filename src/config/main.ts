@@ -43,6 +43,7 @@ interface SettingsView {
   model: string;
   has_key: boolean;
   developer_mode: boolean;
+  size: number;
 }
 
 const elSel = (id: string) => document.getElementById(id) as HTMLSelectElement;
@@ -65,6 +66,8 @@ async function loadSettings() {
     ? "•••••••• saved — leave blank to keep"
     : `paste your ${label} key`;
   elInput("dev_mode").checked = s.developer_mode;
+  elInput("size").value = String(s.size);
+  $("size_val").textContent = `${s.size.toFixed(2)}×`;
   $("status").textContent = s.has_key ? "Key saved." : "No API key set yet.";
 }
 
@@ -90,6 +93,7 @@ async function persistSettings(): Promise<boolean> {
       model: elInput("model").value.trim(),
       apiKey: key.length > 0 ? key : null,
       developerMode: elInput("dev_mode").checked,
+      size: parseFloat(elInput("size").value),
     });
     return true;
   } catch (e) {
@@ -121,6 +125,18 @@ elInput("dev_mode").addEventListener("change", async () => {
       ? "Developer mode ON."
       : "Developer mode off.";
   }
+});
+
+// ================= Bit size =================
+// Live-preview (resize the overlay as you drag) and persist on release.
+const sizeInput = elInput("size");
+sizeInput.addEventListener("input", () => {
+  const v = parseFloat(sizeInput.value);
+  $("size_val").textContent = `${v.toFixed(2)}×`;
+  void invoke("set_bit_size", { scale: v }).catch(() => {});
+});
+sizeInput.addEventListener("change", () => {
+  void persistSettings();
 });
 
 // ================= Do Not Disturb =================

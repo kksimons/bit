@@ -99,6 +99,25 @@ input[type="checkbox"] {
   flex: none;
 }
 
+input[type="range"] {
+  flex: 1 1 auto;
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.slider-row {
+  margin-top: 4px;
+  gap: 10px;
+}
+
+.size-val {
+  flex: none;
+  min-width: 42px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 button {
   margin-top: 14px;
   padding: 8px 16px;

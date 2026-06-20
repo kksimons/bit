@@ -20,6 +20,10 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 #[cfg(target_os = "macos")]
 use tauri::ActivationPolicy;
 
+/// Default square window size for the Bit, in logical pixels. The on-screen
+/// size multiplier resizes around this base.
+const BIT_BASE_SIZE: f64 = 260.0;
+
 /// Toggle dictation: press once to start, again to stop (Ctrl+Opt+Space).
 fn talk_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space)
@@ -42,6 +46,7 @@ struct SettingsView {
     model: String,
     has_key: bool,
     developer_mode: bool,
+    size: f64,
 }
 
 #[tauri::command]
@@ -53,6 +58,7 @@ fn get_settings(app: tauri::AppHandle) -> SettingsView {
         model: s.model,
         has_key: config::get_key(&app).is_some(),
         developer_mode: s.developer_mode,
+        size: s.size,
     }
 }
 
@@ -64,6 +70,7 @@ fn save_settings(
     model: String,
     api_key: Option<String>,
     developer_mode: bool,
+    size: f64,
 ) -> Result<(), String> {
     config::save_settings(
         &app,
@@ -72,6 +79,7 @@ fn save_settings(
             base_url,
             model,
             developer_mode,
+            size,
         },
     )?;
     if let Some(k) = api_key {
@@ -106,6 +114,24 @@ fn delete_workflow(app: tauri::AppHandle, name: String) -> Result<(), String> {
 fn run_workflow(app: tauri::AppHandle, name: String) -> Result<String, String> {
     let wf = workflows::find(&app, &name).ok_or(format!("no workflow named '{name}'"))?;
     workflows::run(&wf)
+}
+
+// ---- Bit size ----
+
+/// Resize the Bit overlay around its base size. `scale` is the user's size
+/// multiplier (clamped to the slider range). The passthrough poller reads the
+/// window size live, so the click-through hit disc follows automatically.
+fn apply_bit_size(app: &tauri::AppHandle, scale: f64) {
+    let Some(win) = app.get_webview_window("bit") else {
+        return;
+    };
+    let px = BIT_BASE_SIZE * scale.clamp(0.5, 2.0);
+    let _ = win.set_size(tauri::LogicalSize::new(px, px));
+}
+
+#[tauri::command]
+fn set_bit_size(app: tauri::AppHandle, scale: f64) {
+    apply_bit_size(&app, scale);
 }
 
 // ---- Do Not Disturb ----
@@ -438,6 +464,8 @@ pub fn run() {
                 .build(app)?;
 
             if let Some(win) = app.get_webview_window("bit") {
+                // Apply the saved on-screen size before the passthrough poller starts.
+                apply_bit_size(app.handle(), config::load_settings(app.handle()).size);
                 spawn_passthrough(app.handle().clone(), win, dragging.clone());
             }
 
@@ -457,6 +485,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
+            set_bit_size,
             get_workflows,
             save_workflow,
             delete_workflow,
