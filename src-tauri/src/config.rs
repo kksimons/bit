@@ -7,6 +7,11 @@ use tauri::Manager;
 pub struct Settings {
     pub base_url: String,
     pub model: String,
+    /// When false (default), the model cannot run raw shell/AppleScript — only
+    /// your enabled workflows + safe built-ins. When true, raw execution tools
+    /// are re-enabled for power users who accept the risk.
+    #[serde(default)]
+    pub developer_mode: bool,
 }
 
 impl Default for Settings {
@@ -14,6 +19,7 @@ impl Default for Settings {
         Settings {
             base_url: "https://api.z.ai/api/anthropic".into(),
             model: "glm-5.2".into(),
+            developer_mode: false,
         }
     }
 }

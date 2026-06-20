@@ -41,6 +41,7 @@ interface SettingsView {
   base_url: string;
   model: string;
   has_key: boolean;
+  developer_mode: boolean;
 }
 
 async function loadSettings() {
@@ -51,21 +52,48 @@ async function loadSettings() {
   elInput("api_key").placeholder = s.has_key
     ? "•••••••• saved — leave blank to keep"
     : "paste your Z.AI key";
-  $("status").textContent = s.has_key ? "Key saved in Keychain." : "No API key set yet.";
+  elInput("dev_mode").checked = s.developer_mode;
+  $("status").textContent = s.has_key ? "Key saved." : "No API key set yet.";
 }
 
-$("save").addEventListener("click", async () => {
+async function persistSettings(): Promise<boolean> {
   const key = elInput("api_key").value.trim();
   try {
     await invoke("save_settings", {
       baseUrl: elInput("base_url").value.trim(),
       model: elInput("model").value.trim(),
       apiKey: key.length > 0 ? key : null,
+      developerMode: elInput("dev_mode").checked,
     });
-    $("status").textContent = "Saved.";
-    await loadSettings();
+    return true;
   } catch (e) {
     $("status").textContent = `Error saving: ${e}`;
+    return false;
+  }
+}
+
+$("save").addEventListener("click", async () => {
+  if (await persistSettings()) {
+    $("status").textContent = "Saved.";
+    await loadSettings();
+  }
+});
+
+// Developer mode toggles immediately (with a confirm, since it grants raw power).
+elInput("dev_mode").addEventListener("change", async () => {
+  if (
+    elInput("dev_mode").checked &&
+    !confirm(
+      "Developer mode lets Bit run arbitrary shell/AppleScript commands by voice. Only enable if you understand the risk. Continue?",
+    )
+  ) {
+    elInput("dev_mode").checked = false;
+    return;
+  }
+  if (await persistSettings()) {
+    $("status").textContent = elInput("dev_mode").checked
+      ? "Developer mode ON."
+      : "Developer mode off.";
   }
 });
 
@@ -109,12 +137,14 @@ async function loadWorkflows() {
     const card = document.createElement("div");
     card.className = "wf-card";
     const summary = wf.steps.map(stepSummary).join(" · ") || "no steps";
+    const draft = wf.enabled ? "" : ` <span class="tag">disabled</span>`;
     card.innerHTML = `
       <div class="row spread">
-        <b>${escapeHtml(wf.name)}</b>
+        <b>${escapeHtml(wf.name)}${draft}</b>
         <label class="switch"><input type="checkbox" ${wf.enabled ? "checked" : ""}/> on</label>
       </div>
       <div class="muted small">${escapeHtml(summary)}</div>
+      ${wf.enabled ? "" : `<div class="muted small">Disabled — review the steps, then switch on to allow it to run.</div>`}
       <div class="row">
         <button class="run">Run</button>
         <button class="edit ghost">Edit</button>
@@ -123,6 +153,7 @@ async function loadWorkflows() {
     card.querySelector<HTMLInputElement>(".switch input")!.addEventListener("change", async (e) => {
       wf.enabled = (e.target as HTMLInputElement).checked;
       await invoke("save_workflow", { workflow: wf }).catch(() => {});
+      await loadWorkflows();
     });
     card.querySelector(".run")!.addEventListener("click", async () => {
       try {

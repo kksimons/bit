@@ -40,6 +40,7 @@ struct SettingsView {
     base_url: String,
     model: String,
     has_key: bool,
+    developer_mode: bool,
 }
 
 #[tauri::command]
@@ -49,6 +50,7 @@ fn get_settings(app: tauri::AppHandle) -> SettingsView {
         base_url: s.base_url,
         model: s.model,
         has_key: config::get_key(&app).is_some(),
+        developer_mode: s.developer_mode,
     }
 }
 
@@ -58,8 +60,16 @@ fn save_settings(
     base_url: String,
     model: String,
     api_key: Option<String>,
+    developer_mode: bool,
 ) -> Result<(), String> {
-    config::save_settings(&app, &config::Settings { base_url, model })?;
+    config::save_settings(
+        &app,
+        &config::Settings {
+            base_url,
+            model,
+            developer_mode,
+        },
+    )?;
     if let Some(k) = api_key {
         if !k.is_empty() {
             config::set_key(&app, &k)?;

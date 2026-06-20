@@ -50,6 +50,7 @@ fn workflows_context(app: &tauri::AppHandle) -> String {
 pub fn ask(app: &tauri::AppHandle, cfg: &AgentConfig, transcript: &str) -> Result<(bool, u8), String> {
     let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
     let system = format!("{SYSTEM}{}", workflows_context(app));
+    let tools = tools::definitions(crate::config::load_settings(app).developer_mode);
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": transcript })];
 
     for _ in 0..MAX_TURNS {
@@ -57,7 +58,7 @@ pub fn ask(app: &tauri::AppHandle, cfg: &AgentConfig, transcript: &str) -> Resul
             "model": cfg.model,
             "max_tokens": 1024,
             "system": system,
-            "tools": tools::definitions(),
+            "tools": tools,
             "messages": messages,
         });
         let v = post(&url, &cfg.api_key, body)?;
