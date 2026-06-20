@@ -635,22 +635,34 @@ pub fn run() {
             // Push-to-talk global shortcut.
             app.global_shortcut().register(talk_shortcut())?;
 
-            // Tray icon is the only chrome: open settings / quit.
+            // Tray icon is the only chrome: open settings / quit. Use a dedicated
+            // monochrome template image (adaptive to the menu bar) built from the
+            // Bit geometry; fall back to the app icon if it can't be decoded.
+            let tray_icon =
+                tauri::image::Image::from_bytes(include_bytes!("../icons/bit-tray.png"))
+                    .map_err(|e| eprintln!("[bit] tray icon decode failed: {e}"))
+                    .ok();
             let settings_i = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit_i = MenuItem::with_id(app, "quit", "Quit Bit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&settings_i, &quit_i])?;
 
-            TrayIconBuilder::with_id("bit-tray")
-                .icon(app.default_window_icon().unwrap().clone())
+            let mut tray = TrayIconBuilder::with_id("bit-tray")
                 .tooltip("Bit")
+                .icon_as_template(true)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "settings" => open_settings(app),
                     "quit" => app.exit(0),
                     _ => {}
-                })
-                .build(app)?;
+                });
+            // Prefer the template silhouette; otherwise the colored app icon.
+            if let Some(icon) = tray_icon {
+                tray = tray.icon(icon);
+            } else if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon).icon_as_template(false);
+            }
+            tray.build(app)?;
 
             if let Some(win) = app.get_webview_window("bit") {
                 // Apply the saved on-screen size before the passthrough poller starts.
