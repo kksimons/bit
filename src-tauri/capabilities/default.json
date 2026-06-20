@@ -7,6 +7,7 @@
     "core:default",
     "core:window:allow-start-dragging",
     "core:window:allow-set-ignore-cursor-events",
-    "opener:default"
+    "opener:default",
+    "dialog:allow-open"
   ]
 }

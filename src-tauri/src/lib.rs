@@ -3,6 +3,7 @@ mod audio;
 mod config;
 mod stt;
 mod tools;
+mod workflows;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -60,6 +61,60 @@ fn save_settings(
             config::set_key(&k)?;
         }
     }
+    Ok(())
+}
+
+// ---- workflows ----
+
+#[tauri::command]
+fn get_workflows(app: tauri::AppHandle) -> Vec<workflows::Workflow> {
+    workflows::load_all(&app)
+}
+
+#[tauri::command]
+fn save_workflow(
+    app: tauri::AppHandle,
+    workflow: workflows::Workflow,
+) -> Result<workflows::Workflow, String> {
+    workflows::upsert(&app, workflow)
+}
+
+#[tauri::command]
+fn delete_workflow(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    workflows::delete(&app, &name)
+}
+
+#[tauri::command]
+fn run_workflow(app: tauri::AppHandle, name: String) -> Result<String, String> {
+    let wf = workflows::find(&app, &name).ok_or(format!("no workflow named '{name}'"))?;
+    workflows::run(&wf)
+}
+
+// ---- Do Not Disturb ----
+
+#[tauri::command]
+fn dnd_status() -> bool {
+    let Ok(out) = std::process::Command::new("shortcuts").arg("list").output() else {
+        return false;
+    };
+    let names = String::from_utf8_lossy(&out.stdout);
+    let has = |n: &str| names.lines().any(|l| l.trim() == n);
+    has("Bit DND On") && has("Bit DND Off")
+}
+
+#[tauri::command]
+fn set_dnd(enabled: bool) -> Result<String, String> {
+    tools::set_focus(enabled)
+}
+
+/// Open the Shortcuts app so the user can create the two required Shortcuts.
+#[tauri::command]
+fn setup_dnd() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("-a")
+        .arg("Shortcuts")
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -157,7 +212,7 @@ fn on_toggle(app: &tauri::AppHandle) {
                         eprintln!("[bit] no Z.AI key set — open Settings to add it");
                         set_bit_state(&app, "neutral");
                     }
-                    Some(cfg) => match agent::ask(&cfg, &text) {
+                    Some(cfg) => match agent::ask(&app, &cfg, &text) {
                         Ok(true) => {
                             println!("[bit] → yes");
                             set_bit_state(&app, "yes");
@@ -180,6 +235,7 @@ fn on_toggle(app: &tauri::AppHandle) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
@@ -253,7 +309,17 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![get_settings, save_settings])
+        .invoke_handler(tauri::generate_handler![
+            get_settings,
+            save_settings,
+            get_workflows,
+            save_workflow,
+            delete_workflow,
+            run_workflow,
+            dnd_status,
+            set_dnd,
+            setup_dnd
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
