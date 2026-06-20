@@ -2,6 +2,7 @@ mod agent;
 mod audio;
 mod config;
 mod stt;
+mod tools;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
