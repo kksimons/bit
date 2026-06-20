@@ -2,9 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::Manager;
 
-const KEYRING_SERVICE: &str = "ca.magsolar.bit";
-const KEYRING_USER: &str = "zai-api-key";
-
 /// Non-secret settings, persisted as JSON in the app config dir.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
@@ -41,20 +38,31 @@ pub fn save_settings(app: &tauri::AppHandle, s: &Settings) -> Result<(), String>
     std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
-/// API key lives in the OS keychain, never on disk.
-pub fn get_key() -> Option<String> {
-    let k = keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .ok()?
-        .get_password()
-        .ok()?;
-    (!k.is_empty()).then_some(k)
+fn key_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    Some(app.path().app_config_dir().ok()?.join("api_key"))
 }
 
-pub fn set_key(key: &str) -> Result<(), String> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
-        .map_err(|e| e.to_string())?
-        .set_password(key.trim())
-        .map_err(|e| e.to_string())
+/// API key stored in a 0600 file in the app's private config dir. (Dev builds
+/// get a fresh ad-hoc code signature each rebuild, which breaks Keychain ACLs
+/// and forced re-entry every launch; a file avoids that.)
+pub fn get_key(app: &tauri::AppHandle) -> Option<String> {
+    let s = std::fs::read_to_string(key_path(app)?).ok()?;
+    let s = s.trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+pub fn set_key(app: &tauri::AppHandle, key: &str) -> Result<(), String> {
+    let path = key_path(app).ok_or("no config dir")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, key.trim()).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Everything the agent needs to make a request. None if no key is configured.
@@ -66,7 +74,7 @@ pub struct AgentConfig {
 
 pub fn load_agent_config(app: &tauri::AppHandle) -> Option<AgentConfig> {
     let s = load_settings(app);
-    let api_key = get_key()?;
+    let api_key = get_key(app)?;
     Some(AgentConfig {
         base_url: s.base_url,
         model: s.model,

@@ -18,8 +18,10 @@ Honesty is critical: only answer \"yes\" if you ACTUALLY completed the requested
 tool results confirm success. If any tool returns an error (is_error true) or a non-zero exit code, \
 or you could not carry out the request, answer \"no\". Never claim success you did not verify. \
 \
-You can ONLY speak to the user with a single word: \"yes\" or \"no\". \
-Your final message must be exactly one lowercase word: yes or no.";
+You can ONLY speak with the word \"yes\" or \"no\". For personality, you MAY repeat it \
+up to three times for emphasis when the moment fits — an excited \"yes yes yes\", a firm \
+\"no no no\" — but usually once is right. Your final message must be only the word yes or no, \
+repeated 1 to 3 times, lowercase, nothing else.";
 
 const MAX_TURNS: usize = 8;
 
@@ -44,7 +46,8 @@ fn workflows_context(app: &tauri::AppHandle) -> String {
 
 /// Run the agent loop: call the model, execute any tool calls, repeat until it
 /// gives a final answer, then reduce that to a yes (true) / no (false) verdict.
-pub fn ask(app: &tauri::AppHandle, cfg: &AgentConfig, transcript: &str) -> Result<bool, String> {
+/// Returns (verdict, times): true=yes/false=no, repeated 1..=3 for emphasis.
+pub fn ask(app: &tauri::AppHandle, cfg: &AgentConfig, transcript: &str) -> Result<(bool, u8), String> {
     let url = format!("{}/v1/messages", cfg.base_url.trim_end_matches('/'));
     let system = format!("{SYSTEM}{}", workflows_context(app));
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": transcript })];
@@ -101,7 +104,7 @@ pub fn ask(app: &tauri::AppHandle, cfg: &AgentConfig, transcript: &str) -> Resul
                 }
             }
         }
-        return Ok(reduce_yes_no(&text));
+        return Ok(reduce_verdict(&text));
     }
 
     Err("tool loop exceeded max turns".into())
@@ -122,13 +125,23 @@ fn post(url: &str, key: &str, body: Value) -> Result<Value, String> {
     }
 }
 
-/// Map free text to yes/no by whichever word appears first.
-fn reduce_yes_no(text: &str) -> bool {
+/// Map free text to (verdict, times): count yes/no words, pick the winner, and
+/// cap the repeat at 3. Defaults to a single "no" when nothing matches.
+fn reduce_verdict(text: &str) -> (bool, u8) {
     let lower = text.to_lowercase();
-    match (lower.find("yes"), lower.find("no")) {
-        (Some(y), Some(n)) => y <= n,
-        (Some(_), None) => true,
-        (None, Some(_)) => false,
-        (None, None) => false,
+    let mut yes = 0u8;
+    let mut no = 0u8;
+    for tok in lower.split(|c: char| !c.is_alphabetic()) {
+        match tok {
+            "yes" | "yeah" | "yep" | "yup" => yes = yes.saturating_add(1),
+            "no" | "nope" | "nah" => no = no.saturating_add(1),
+            _ => {}
+        }
     }
+    if yes == 0 && no == 0 {
+        return (false, 1);
+    }
+    let verdict = yes >= no;
+    let times = if verdict { yes } else { no }.clamp(1, 3);
+    (verdict, times)
 }

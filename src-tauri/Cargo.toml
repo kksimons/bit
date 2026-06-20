@@ -28,7 +28,4 @@ serde_json = "1"
 transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx"] }
 cpal = "0.15"
 ureq = { version = "2", features = ["json"] }
-# API key stored in the OS keychain, not on disk
-# (keyring 3.x needs an explicit platform backend feature, else it no-ops)
-keyring = { version = "3", features = ["apple-native"] }
 

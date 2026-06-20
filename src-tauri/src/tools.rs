@@ -1,6 +1,7 @@
 use crate::workflows::{self, GhosttyTab, Step, Workflow};
 use serde_json::{json, Value};
 use std::process::Command;
+use tauri::Manager;
 
 const MAX_OUTPUT: usize = 4000;
 
@@ -75,6 +76,11 @@ pub fn definitions() -> Value {
             }
         },
         {
+            "name": "move_bit",
+            "description": "Move the Bit pet to the other screen (or opposite corner on a single screen). Use when the user shoos it away, e.g. 'get out of here', 'go away', 'move over there', 'shoo'.",
+            "input_schema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "list_workflows",
             "description": "List the user's saved workflows (named multi-step routines) with their trigger phrases and steps.",
             "input_schema": { "type": "object", "properties": {} }
@@ -135,6 +141,12 @@ pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<Stri
                 .and_then(|v| v.as_bool())
                 .ok_or("missing enabled")?;
             set_focus(enabled)
+        }
+        "move_bit" => {
+            let win = app
+                .get_webview_window("bit")
+                .ok_or("bit window not found")?;
+            crate::motion::shoo(&win)
         }
         "open_terminal_tabs" => {
             let tabs: Vec<GhosttyTab> = serde_json::from_value(

@@ -106,6 +106,16 @@ export class Bit {
     return this.state;
   }
 
+  /** Say yes/no `times` (1–3) in quick succession — Bit's bit of personality. */
+  react(kind: "yes" | "no", times: number) {
+    const n = Math.max(1, Math.min(3, Math.round(times)));
+    const interval = 430;
+    for (let i = 0; i < n; i++) {
+      const last = i === n - 1;
+      window.setTimeout(() => this.setState(kind, last ? 1400 : 0), i * interval);
+    }
+  }
+
   private swapTo(state: BitState) {
     this.state = state;
     this.mesh.geometry.dispose();
@@ -156,10 +166,22 @@ export class Bit {
       }
       // symmetric dip: 1 -> MIN_SCALE at midpoint -> 1
       scale = 1 - (1 - MIN_SCALE) * Math.sin(p * Math.PI);
+      this.material.emissiveIntensity = 0.85;
       if (p >= 1) this.transition.active = false;
+    } else if (this.state === "listening") {
+      // unmistakable: a strong, fast "breathing" pulse + glow throb so it's
+      // obvious the Bit is actively listening after a single press.
+      const pulse = (Math.sin(t * 7) + 1) / 2; // 0..1
+      scale = 1.06 + pulse * 0.14;
+      this.material.emissiveIntensity = 0.6 + pulse * 1.1;
+    } else if (this.state === "thinking") {
+      const pulse = (Math.sin(t * 12) + 1) / 2;
+      scale = 1;
+      this.material.emissiveIntensity = 0.7 + pulse * 0.7;
     } else {
       // gentle slow "breathing" at rest (smooth, not jittery)
       scale = this.state === "neutral" ? 1 + Math.sin(t * 1.2) * 0.02 : 1;
+      this.material.emissiveIntensity = 0.85;
     }
     this.mesh.scale.setScalar(scale);
 

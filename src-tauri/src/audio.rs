@@ -111,11 +111,31 @@ impl Recorder {
         }
     }
 
-    /// Stop recording and return the captured mono samples + their sample rate.
-    pub fn stop(&self) -> (Vec<f32>, u32) {
-        self.recording.store(false, Ordering::Relaxed);
-        let samples = self.buffer.lock().unwrap().clone();
-        (samples, self.sample_rate.load(Ordering::Relaxed))
+    /// Stop recording and return the captured mono samples + sample rate.
+    /// Returns None if recording was already stopped — so a manual press and an
+    /// automatic silence-stop can race and only one wins (no double-processing).
+    pub fn stop(&self) -> Option<(Vec<f32>, u32)> {
+        if self.recording.swap(false, Ordering::Relaxed) {
+            let samples = self.buffer.lock().unwrap().clone();
+            Some((samples, self.sample_rate.load(Ordering::Relaxed)))
+        } else {
+            None
+        }
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate.load(Ordering::Relaxed)
+    }
+
+    /// RMS energy over the most recent `window` samples (for silence detection).
+    pub fn recent_rms(&self, window: usize) -> f32 {
+        let b = self.buffer.lock().unwrap();
+        let n = b.len().min(window);
+        if n == 0 {
+            return 0.0;
+        }
+        let sum: f32 = b[b.len() - n..].iter().map(|x| x * x).sum();
+        (sum / n as f32).sqrt()
     }
 }
 

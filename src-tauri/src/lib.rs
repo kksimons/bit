@@ -1,12 +1,14 @@
 mod agent;
 mod audio;
 mod config;
+mod motion;
 mod stt;
 mod tools;
 mod workflows;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -26,9 +28,11 @@ fn talk_shortcut() -> Shortcut {
 struct AppState {
     recorder: audio::Recorder,
     stt: Arc<stt::Stt>,
-    /// Whether the shortcut key is physically held — debounces auto-repeat so a
-    /// held key toggles exactly once.
-    key_held: AtomicBool,
+    /// Last time the talk shortcut toggled — time-debounces duplicate/auto-repeat
+    /// shortcut events (macOS can double-fire), so one press = one toggle.
+    last_toggle: Mutex<Instant>,
+    /// Set while the user is dragging the Bit (pauses the click-through poller).
+    dragging: Arc<AtomicBool>,
 }
 
 #[derive(serde::Serialize)]
@@ -44,7 +48,7 @@ fn get_settings(app: tauri::AppHandle) -> SettingsView {
     SettingsView {
         base_url: s.base_url,
         model: s.model,
-        has_key: config::get_key().is_some(),
+        has_key: config::get_key(&app).is_some(),
     }
 }
 
@@ -58,7 +62,7 @@ fn save_settings(
     config::save_settings(&app, &config::Settings { base_url, model })?;
     if let Some(k) = api_key {
         if !k.is_empty() {
-            config::set_key(&k)?;
+            config::set_key(&app, &k)?;
         }
     }
     Ok(())
@@ -118,10 +122,68 @@ fn setup_dnd() -> Result<(), String> {
     Ok(())
 }
 
+// ---- drag / fling physics ----
+
+/// Begin a custom drag: a background thread moves the Bit window to follow the
+/// cursor and tracks release velocity, so letting go can fling it with momentum.
+#[tauri::command]
+fn start_drag(app: tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    if state.dragging.swap(true, Ordering::Relaxed) {
+        return; // already dragging
+    }
+    let dragging = state.dragging.clone();
+    let Some(win) = app.get_webview_window("bit") else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let start_cur = app.cursor_position().unwrap_or_default();
+        let start_win = win.outer_position().unwrap_or_default();
+        let off_x = start_cur.x - start_win.x as f64;
+        let off_y = start_cur.y - start_win.y as f64;
+        let mut last = start_cur;
+        let mut vel = (0.0_f64, 0.0_f64); // px per ms, smoothed
+        while dragging.load(Ordering::Relaxed) {
+            let cur = match app.cursor_position() {
+                Ok(c) => c,
+                Err(_) => break,
+            };
+            let nx = (cur.x - off_x).round() as i32;
+            let ny = (cur.y - off_y).round() as i32;
+            let _ = win.set_position(tauri::PhysicalPosition::new(nx, ny));
+            // EMA of cursor velocity (tick ≈ 8ms)
+            let vx = (cur.x - last.x) / 8.0;
+            let vy = (cur.y - last.y) / 8.0;
+            vel.0 = vel.0 * 0.6 + vx * 0.4;
+            vel.1 = vel.1 * 0.6 + vy * 0.4;
+            last = cur;
+            std::thread::sleep(Duration::from_millis(8));
+        }
+        motion::fling(&win, vel);
+    });
+}
+
+#[tauri::command]
+fn end_drag(app: tauri::AppHandle) {
+    app.state::<AppState>()
+        .dragging
+        .store(false, Ordering::Relaxed);
+}
+
 /// Tell the Bit overlay to change form/state.
 fn set_bit_state(app: &tauri::AppHandle, state: &str) {
     if let Some(win) = app.get_webview_window("bit") {
         let _ = win.emit("bit-state", state);
+    }
+}
+
+/// Emit the final yes/no verdict and how many times to say it (1..=3).
+fn emit_verdict(app: &tauri::AppHandle, yes: bool, times: u8) {
+    if let Some(win) = app.get_webview_window("bit") {
+        let _ = win.emit(
+            "bit-verdict",
+            serde_json::json!({ "kind": if yes { "yes" } else { "no" }, "times": times }),
+        );
     }
 }
 
@@ -135,25 +197,49 @@ fn open_settings(app: &tauri::AppHandle) {
         return;
     }
 
+    // Become a regular app so the new window can take focus, then build and
+    // explicitly focus it — otherwise (from accessory mode) it opens behind and
+    // needs a second click to come forward.
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(ActivationPolicy::Regular);
 
-    let _ = WebviewWindowBuilder::new(app, "config", WebviewUrl::App("config.html".into()))
+    match WebviewWindowBuilder::new(app, "config", WebviewUrl::App("config.html".into()))
         .title("Bit Settings")
         .inner_size(440.0, 540.0)
         .resizable(true)
-        .build();
+        .focused(true)
+        .build()
+    {
+        Ok(win) => {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+        Err(e) => eprintln!("[bit] failed to open settings: {e}"),
+    }
 }
 
 /// Background poll: keep the overlay click-through everywhere except over the
 /// Bit itself, so empty pixels pass clicks to whatever is behind it. We poll the
 /// global cursor against the window's center so it works even while the window is
 /// ignoring cursor events (and thus receiving no DOM mouse events).
-fn spawn_passthrough(app: tauri::AppHandle, window: tauri::WebviewWindow) {
+fn spawn_passthrough(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    dragging: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(70));
+            // While dragging/flinging, leave the window interactive and let the
+            // motion code own positioning.
+            if dragging.load(Ordering::Relaxed) {
+                if last != Some(true) {
+                    let _ = window.set_ignore_cursor_events(false);
+                    last = Some(true);
+                }
+                continue;
+            }
             let (pos, size) = match (window.outer_position(), window.outer_size()) {
                 (Ok(p), Ok(s)) => (p, s),
                 _ => continue,
@@ -177,58 +263,100 @@ fn spawn_passthrough(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     });
 }
 
-/// Toggle dictation on a fresh key press: start recording if idle, otherwise
-/// stop and run transcription → agent → yes/no.
+/// A press starts listening (if idle) or stops early (if already listening).
+/// Listening normally ends on its own when you go quiet (see the silence watcher).
 fn on_toggle(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     if !state.recorder.is_recording() {
+        println!("[bit] REC start");
         state.recorder.start();
         set_bit_state(app, "listening");
+        spawn_silence_watcher(app.clone());
     } else {
-        let (samples, rate) = state.recorder.stop();
-        set_bit_state(app, "thinking");
-        let stt = state.stt.clone();
-        let app = app.clone();
-        std::thread::spawn(move || {
-                let samples_16k = audio::resample_to_16k(&samples, rate);
-                let text = match stt
-                    .ensure_loaded()
-                    .and_then(|_| stt.transcribe(&samples_16k))
-                {
-                    Ok(t) => t.trim().to_string(),
-                    Err(e) => {
-                        eprintln!("[bit] stt error: {e}");
-                        String::new()
-                    }
-                };
-                println!("[bit] heard: {text:?}");
-                let _ = app.emit("transcript", text.clone());
-                if text.is_empty() {
-                    set_bit_state(&app, "neutral");
-                    return;
-                }
-                match config::load_agent_config(&app) {
-                    None => {
-                        eprintln!("[bit] no Z.AI key set — open Settings to add it");
-                        set_bit_state(&app, "neutral");
-                    }
-                    Some(cfg) => match agent::ask(&app, &cfg, &text) {
-                        Ok(true) => {
-                            println!("[bit] → yes");
-                            set_bit_state(&app, "yes");
-                        }
-                        Ok(false) => {
-                            println!("[bit] → no");
-                            set_bit_state(&app, "no");
-                        }
-                        Err(e) => {
-                            eprintln!("[bit] agent error: {e}");
-                            set_bit_state(&app, "no");
-                        }
-                    },
-                }
-            });
+        finish_recording(app);
     }
+}
+
+/// Auto-end listening when the user stops talking: once speech is detected, a
+/// ~1.1s lull (or a 30s cap) finishes the recording. So one press is enough —
+/// no second press needed.
+fn spawn_silence_watcher(app: tauri::AppHandle) {
+    let recorder = app.state::<AppState>().recorder.clone();
+    std::thread::spawn(move || {
+        let rate = recorder.sample_rate().max(1) as usize;
+        let window = rate / 8; // ~125ms RMS window
+        const SPEECH_RMS: f32 = 0.012;
+        let silence_ticks_needed = 11; // ~1.1s at 100ms ticks
+        let max_ticks = 300; // 30s safety cap
+        let mut spoke = false;
+        let mut silent_ticks = 0;
+        let mut ticks = 0;
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if !recorder.is_recording() {
+                return; // ended elsewhere (manual press)
+            }
+            ticks += 1;
+            let rms = recorder.recent_rms(window);
+            if rms > SPEECH_RMS {
+                spoke = true;
+                silent_ticks = 0;
+            } else if spoke {
+                silent_ticks += 1;
+            }
+            if (spoke && silent_ticks >= silence_ticks_needed) || ticks >= max_ticks {
+                finish_recording(&app);
+                return;
+            }
+        }
+    });
+}
+
+/// Stop recording (if still active) and run transcription → agent → yes/no.
+fn finish_recording(app: &tauri::AppHandle) {
+    let Some((samples, rate)) = app.state::<AppState>().recorder.stop() else {
+        return; // already finished by the other path
+    };
+    let secs = samples.len() as f64 / rate.max(1) as f64;
+    println!("[bit] REC stop: {} samples (~{secs:.1}s)", samples.len());
+    set_bit_state(app, "thinking");
+    let stt = app.state::<AppState>().stt.clone();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let samples_16k = audio::resample_to_16k(&samples, rate);
+        let text = match stt
+            .ensure_loaded()
+            .and_then(|_| stt.transcribe(&samples_16k))
+        {
+            Ok(t) => t.trim().to_string(),
+            Err(e) => {
+                eprintln!("[bit] stt error: {e}");
+                String::new()
+            }
+        };
+        println!("[bit] heard: {text:?}");
+        let _ = app.emit("transcript", text.clone());
+        if text.is_empty() {
+            set_bit_state(&app, "neutral");
+            return;
+        }
+        match config::load_agent_config(&app) {
+            None => {
+                eprintln!("[bit] no Z.AI key set — open Settings to add it");
+                set_bit_state(&app, "neutral");
+            }
+            Some(cfg) => match agent::ask(&app, &cfg, &text) {
+                Ok((yes, times)) => {
+                    println!("[bit] → {} x{times}", if yes { "yes" } else { "no" });
+                    emit_verdict(&app, yes, times);
+                }
+                Err(e) => {
+                    eprintln!("[bit] agent error: {e}");
+                    emit_verdict(&app, false, 1);
+                }
+            },
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -242,18 +370,19 @@ pub fn run() {
                     if shortcut != &talk_shortcut() {
                         return;
                     }
-                    let state = app.state::<AppState>();
-                    match event.state() {
-                        // Fresh press toggles; ignore auto-repeat while held.
-                        ShortcutState::Pressed => {
-                            if !state.key_held.swap(true, Ordering::Relaxed) {
-                                on_toggle(app);
-                            }
-                        }
-                        ShortcutState::Released => {
-                            state.key_held.store(false, Ordering::Relaxed);
-                        }
+                    // Act on key-down only, time-debounced so one press = one
+                    // toggle even if macOS repeats the event while held.
+                    if event.state() != ShortcutState::Pressed {
+                        return;
                     }
+                    let state = app.state::<AppState>();
+                    let mut last = state.last_toggle.lock().unwrap();
+                    if last.elapsed() < Duration::from_millis(350) {
+                        return;
+                    }
+                    *last = Instant::now();
+                    drop(last);
+                    on_toggle(app);
                 })
                 .build(),
         )
@@ -265,10 +394,12 @@ pub fn run() {
             // Speech-to-text state (model downloads/loads lazily on first use).
             let app_data = app.path().app_data_dir()?;
             let stt = Arc::new(stt::Stt::new(stt::model_dir(&app_data)));
+            let dragging = Arc::new(AtomicBool::new(false));
             app.manage(AppState {
                 recorder: audio::Recorder::new(),
                 stt,
-                key_held: AtomicBool::new(false),
+                last_toggle: Mutex::new(Instant::now()),
+                dragging: dragging.clone(),
             });
 
             // Push-to-talk global shortcut.
@@ -293,7 +424,7 @@ pub fn run() {
                 .build(app)?;
 
             if let Some(win) = app.get_webview_window("bit") {
-                spawn_passthrough(app.handle().clone(), win);
+                spawn_passthrough(app.handle().clone(), win, dragging.clone());
             }
 
             Ok(())
@@ -318,7 +449,9 @@ pub fn run() {
             run_workflow,
             dnd_status,
             set_dnd,
-            setup_dnd
+            setup_dnd,
+            start_drag,
+            end_drag
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
