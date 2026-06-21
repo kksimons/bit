@@ -1,0 +1,11 @@
+# Build-time environment for the Rust core.
+#
+# MACOSX_DEPLOYMENT_TARGET must be >= 10.15 for whisper.cpp (the multilingual
+# transcription engine), which uses C++ `std::filesystem` — unavailable below
+# 10.15. cmake (which builds whisper.cpp via whisper-rs-sys) reads this env var
+# and propagates it as `-mmacosx-version-min` into the C++ compile. Without it,
+# the build silently falls back to 10.13 (Tauri's historical default) and fails.
+#
+# Bit's own minimumSystemVersion in tauri.conf.json is set to match (11.0).
+[env]
+MACOSX_DEPLOYMENT_TARGET = "11.0"

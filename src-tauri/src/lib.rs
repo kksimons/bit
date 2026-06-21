@@ -69,23 +69,10 @@ fn get_settings(app: tauri::AppHandle) -> SettingsView {
 #[tauri::command]
 fn save_settings(
     app: tauri::AppHandle,
-    provider: String,
-    base_url: String,
-    model: String,
+    settings: config::Settings,
     api_key: Option<String>,
-    developer_mode: bool,
-    size: f64,
 ) -> Result<(), String> {
-    config::save_settings(
-        &app,
-        &config::Settings {
-            provider,
-            base_url,
-            model,
-            developer_mode,
-            size,
-        },
-    )?;
+    config::save_settings(&app, &settings)?;
     if let Some(k) = api_key {
         if !k.is_empty() {
             config::set_key(&app, &k)?;
@@ -353,6 +340,83 @@ fn set_mcp_disabled_tools(
     mcp::set_disabled_tools(&app, &name, disabled)
 }
 
+// ---- Transcription models ----
+
+/// A model's UI-facing metadata + on-disk state.
+#[derive(serde::Serialize)]
+struct ModelView {
+    id: String,
+    name: String,
+    description: String,
+    languages: String,
+    size_mb: u64,
+    downloaded: bool,
+    active: bool,
+}
+
+#[tauri::command]
+fn get_stt_models(app: tauri::AppHandle) -> Vec<ModelView> {
+    let app_data = app.path().app_data_dir().unwrap_or_default();
+    let active = config::load_settings(&app).stt_model;
+    stt::MODELS
+        .iter()
+        .map(|m| ModelView {
+            downloaded: stt::model_ready(&app_data, m.id),
+            active: m.id == active,
+            id: m.id.into(),
+            name: m.name.into(),
+            description: m.description.into(),
+            languages: m.languages.into(),
+            size_mb: m.size_mb,
+        })
+        .collect()
+}
+
+/// Download a model's files. Emits `stt-download-progress` events as each
+/// file completes so the UI can show a progress bar. Runs synchronously — the
+/// UI calls this from a background task and awaits completion.
+#[tauri::command]
+fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let app_for_progress = app.clone();
+    stt::download_model(&app_data, &model_id, |done, total, name| {
+        let _ = app_for_progress.emit(
+            "stt-download-progress",
+            serde_json::json!({ "model": model_id, "done": done, "total": total, "file": name }),
+        );
+    })?;
+    let _ = app.emit(
+        "stt-download-progress",
+        serde_json::json!({ "model": model_id, "done": 0, "total": 0, "file": "__complete__" }),
+    );
+    Ok(())
+}
+
+/// Set the active transcription model. Takes effect on the next recording —
+/// `Stt::ensure_loaded` reloads when the id changes.
+#[tauri::command]
+fn set_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
+    // Validate the id is a known model so a bad UI call can't break STT.
+    if !stt::MODELS.iter().any(|m| m.id == model_id) {
+        return Err(format!("unknown model: {model_id}"));
+    }
+    let mut s = config::load_settings(&app);
+    s.stt_model = model_id;
+    config::save_settings(&app, &s)
+}
+
+/// Remove a downloaded model from disk (the user picked a different one and
+/// wants the space back). Refuses if it's the active model.
+#[tauri::command]
+fn delete_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
+    let active = config::load_settings(&app).stt_model;
+    if active == model_id {
+        return Err("can’t delete the active model — switch first".into());
+    }
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    stt::delete_model(&app_data, &model_id)
+}
+
 /// One credential field a preset asks the UI to collect.
 #[derive(serde::Serialize)]
 struct PresetFieldView {
@@ -563,6 +627,19 @@ fn on_toggle(app: &tauri::AppHandle) {
             emit_verdict(app, false, 1);
             return;
         }
+        // First-run guard: if the user hasn't downloaded any transcription
+        // model yet, don't silently start a 700 MB download mid-recording
+        // (the old behavior, which looked like a hang). Open Settings to the
+        // Transcription section so they can pick one. We can't deep-link to a
+        // section, so we just open the window — the empty state there explains
+        // what's needed.
+        let app_data = app.path().app_data_dir().unwrap_or_default();
+        let active = config::load_settings(app).stt_model;
+        if !stt::model_ready(&app_data, &active) {
+            eprintln!("[bit] no transcription model downloaded — opening Settings");
+            open_settings(app);
+            return;
+        }
         println!("[bit] REC start");
         state.recorder.start();
         set_bit_state(app, "listening");
@@ -620,7 +697,8 @@ fn finish_recording(app: &tauri::AppHandle) {
     std::thread::spawn(move || {
         println!("[bit] worker: resampling + loading STT model…");
         let samples_16k = audio::resample_to_16k(&samples, rate);
-        let text = match stt.ensure_loaded().and_then(|()| {
+        let active_model = config::load_settings(&app).stt_model;
+        let text = match stt.ensure_loaded(&active_model).and_then(|()| {
             println!("[bit] worker: STT model loaded, transcribing…");
             stt.transcribe(&samples_16k)
         }) {
@@ -698,9 +776,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(ActivationPolicy::Accessory);
 
-            // Speech-to-text state (model downloads/loads lazily on first use).
+            // Speech-to-text state. The model dir is decided per-active-model
+            // (see stt::model_dir); Stt just needs the app-data root.
             let app_data = app.path().app_data_dir()?;
-            let stt = Arc::new(stt::Stt::new(stt::model_dir(&app_data)));
+            let stt = Arc::new(stt::Stt::new(app_data));
             let dragging = Arc::new(AtomicBool::new(false));
             // The MCP registry is registered TWICE: nested in AppState (for the
             // commands that reach via `app.state::<AppState>().mcp`) AND as a
@@ -801,6 +880,10 @@ pub fn run() {
             add_http_server,
             get_mcp_tools,
             set_mcp_disabled_tools,
+            get_stt_models,
+            download_stt_model,
+            set_stt_model,
+            delete_stt_model,
             get_mcp_presets,
             autostart_state,
             set_autostart

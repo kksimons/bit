@@ -100,12 +100,17 @@ async function persistSettings(): Promise<boolean> {
   const key = elInput("api_key").value.trim();
   try {
     await invoke("save_settings", {
-      provider: elSel("provider").value,
-      baseUrl: elInput("base_url").value.trim(),
-      model: elInput("model").value.trim(),
+      // The backend takes a single `settings: Settings` struct (Tauri
+      // deserializes this object straight into it) + a separate `apiKey`.
+      settings: {
+        provider: elSel("provider").value,
+        base_url: elInput("base_url").value.trim(),
+        model: elInput("model").value.trim(),
+        developer_mode: elInput("dev_mode").checked,
+        size: parseFloat(elInput("size").value),
+        stt_model: currentSttModel(),
+      },
       apiKey: key.length > 0 ? key : null,
-      developerMode: elInput("dev_mode").checked,
-      size: parseFloat(elInput("size").value),
     });
     return true;
   } catch (e) {
@@ -899,10 +904,101 @@ elInput("autostart")?.addEventListener("change", async () => {
   }
 });
 
+// ================= Transcription models =================
+// A picker (Handy-style): each model is a card with name, size, languages, a
+// download button (with progress), an activate button, and an “active” badge.
+// First run with no model → the backend opens Settings; this list shows what
+// to do.
+
+interface SttModelView {
+  id: string;
+  name: string;
+  description: string;
+  languages: string;
+  size_mb: number;
+  downloaded: boolean;
+  active: boolean;
+}
+let sttModels: SttModelView[] = [];
+
+async function loadSttModels() {
+  sttModels = await invoke<SttModelView[]>("get_stt_models").catch(() => []);
+  renderSttModels();
+}
+
+function renderSttModels() {
+  const root = $("stt_models");
+  root.innerHTML = "";
+  for (const m of sttModels) {
+    const card = document.createElement("div");
+    card.className = `model-card${m.active ? " active" : ""}`;
+    const activeBadge = m.active ? ` <span class="tag">active</span>` : "";
+    card.innerHTML = `
+      <div class="row spread">
+        <b>${escapeHtml(m.name)}${activeBadge}</b>
+        <span class="muted small">${m.size_mb} MB</span>
+      </div>
+      <div class="model-meta">${escapeHtml(m.description)} · ${escapeHtml(m.languages)}</div>
+      <div class="row">
+        ${actionButton(m)}
+      </div>`;
+    card.querySelector(".activate")?.addEventListener("click", async () => {
+      try {
+        await invoke("set_stt_model", { modelId: m.id });
+        await loadSttModels();
+      } catch (e) {
+        $("stt_status").textContent = `Couldn’t switch: ${e}`;
+      }
+    });
+    card.querySelector(".download")?.addEventListener("click", async (el) => {
+      const btn = el.currentTarget as HTMLButtonElement;
+      btn.disabled = true;
+      btn.textContent = "Downloading…";
+      $("stt_status").textContent = `Downloading ${m.name} (~${m.size_mb} MB)…`;
+      try {
+        await invoke("download_stt_model", { modelId: m.id });
+        $("stt_status").textContent = `${m.name} downloaded.`;
+      } catch (e) {
+        $("stt_status").textContent = `Download failed: ${e}`;
+      }
+      await loadSttModels();
+    });
+    card.querySelector(".del")?.addEventListener("click", async () => {
+      if (confirm(`Delete the ${m.name} model files from your Mac?`)) {
+        try {
+          await invoke("delete_stt_model", { modelId: m.id });
+        } catch (e) {
+          $("stt_status").textContent = `${e}`;
+        }
+        await loadSttModels();
+      }
+    });
+    root.appendChild(card);
+  }
+}
+
+function actionButton(m: SttModelView): string {
+  if (m.active) {
+    return `<span class="muted small">In use</span>`;
+  }
+  if (!m.downloaded) {
+    return `<button type="button" class="download ghost">Download</button>`;
+  }
+  return `<button type="button" class="activate">Use this</button>
+          <button type="button" class="del ghost danger">Delete</button>`;
+}
+
+/// The active model id, for `persistSettings` to round-trip. Falls back to the
+/// default if nothing's loaded yet (shouldn't happen — loadSttModels runs first).
+function currentSttModel(): string {
+  return sttModels.find((m) => m.active)?.id ?? "parakeet-v2";
+}
+
 // ================= init =================
 void loadSettings();
 void refreshDnd();
 void loadWorkflows();
 void loadPresets();
 void loadMcpServers();
+void loadSttModels();
 void loadAutostart();

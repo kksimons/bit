@@ -29,6 +29,14 @@ pub struct Settings {
     /// On-screen size multiplier for the Bit (0.5–2.0). Resizes the overlay.
     #[serde(default = "default_size")]
     pub size: f64,
+    /// Which transcription model is active: "parakeet-v2" (default) or
+    /// "whisper-base". See `stt::MODELS`. Blank/unknown → default.
+    #[serde(default = "default_stt_model")]
+    pub stt_model: String,
+}
+
+fn default_stt_model() -> String {
+    crate::stt::DEFAULT_MODEL_ID.into()
 }
 
 impl Default for Settings {
@@ -39,6 +47,7 @@ impl Default for Settings {
             model: "glm-5.2".into(),
             developer_mode: false,
             size: default_size(),
+            stt_model: default_stt_model(),
         }
     }
 }

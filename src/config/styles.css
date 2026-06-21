@@ -419,6 +419,37 @@ textarea:focus {
   border-color: #5a4326;
 }
 
+/* Transcription model picker */
+.model-card {
+  background: #0c1218;
+  border: 1px solid #25333f;
+  border-radius: 9px;
+  padding: 12px 14px;
+  margin-top: 10px;
+}
+
+.model-card.active {
+  border-color: var(--cyan);
+}
+
+.model-card .model-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.model-card progress {
+  width: 100%;
+  margin-top: 8px;
+  height: 6px;
+}
+
+.model-card .progress-label {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
 footer {
   margin-top: 18px;
   font-size: 12px;

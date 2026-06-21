@@ -29,6 +29,8 @@ Dev keys (click the Bit to focus first): `y` = yes, `n` = no, `t` = thinking,
 - [Bun](https://bun.sh) (JS runtime + package manager)
 - A Rust toolchain (`rustup`) — Tauri compiles the native core
 - Xcode Command Line Tools (`xcode-select --install`)
+- `cmake` (`brew install cmake`) — needed to build whisper.cpp (the
+  multilingual transcription model) from source
 
 ### Run the dev build
 
