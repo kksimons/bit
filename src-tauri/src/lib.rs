@@ -549,6 +549,20 @@ fn spawn_passthrough(
 fn on_toggle(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     if !state.recorder.is_recording() {
+        // Refuse visibly if the mic never came up (no permission / no device).
+        // Previously this silently started a recording that captured nothing,
+        // then hung in "thinking" for ~30s — exactly the stuck-on-thinking bug.
+        if !state.recorder.available() {
+            let reason = state
+                .recorder
+                .last_error()
+                .unwrap_or_else(|| "microphone unavailable".into());
+            eprintln!("[bit] push-to-talk refused: {reason}");
+            // Flash “no” once so the user sees the press registered but failed,
+            // rather than wondering if the shortcut is dead.
+            emit_verdict(app, false, 1);
+            return;
+        }
         println!("[bit] REC start");
         state.recorder.start();
         set_bit_state(app, "listening");
@@ -604,11 +618,12 @@ fn finish_recording(app: &tauri::AppHandle) {
     let stt = app.state::<AppState>().stt.clone();
     let app = app.clone();
     std::thread::spawn(move || {
+        println!("[bit] worker: resampling + loading STT model…");
         let samples_16k = audio::resample_to_16k(&samples, rate);
-        let text = match stt
-            .ensure_loaded()
-            .and_then(|_| stt.transcribe(&samples_16k))
-        {
+        let text = match stt.ensure_loaded().and_then(|()| {
+            println!("[bit] worker: STT model loaded, transcribing…");
+            stt.transcribe(&samples_16k)
+        }) {
             Ok(t) => t.trim().to_string(),
             Err(e) => {
                 eprintln!("[bit] stt error: {e}");
@@ -618,6 +633,7 @@ fn finish_recording(app: &tauri::AppHandle) {
         println!("[bit] heard: {text:?}");
         let _ = app.emit("transcript", text.clone());
         if text.is_empty() {
+            println!("[bit] worker: empty transcript → neutral");
             set_bit_state(&app, "neutral");
             return;
         }
@@ -626,16 +642,22 @@ fn finish_recording(app: &tauri::AppHandle) {
                 eprintln!("[bit] no Z.AI key set — open Settings to add it");
                 set_bit_state(&app, "neutral");
             }
-            Some(cfg) => match agent::ask(&app, &cfg, &text) {
-                Ok((yes, times)) => {
-                    println!("[bit] → {} x{times}", if yes { "yes" } else { "no" });
-                    emit_verdict(&app, yes, times);
+            Some(cfg) => {
+                println!(
+                    "[bit] worker: calling agent (provider={}, model={})…",
+                    cfg.provider, cfg.model
+                );
+                match agent::ask(&app, &cfg, &text) {
+                    Ok((yes, times)) => {
+                        println!("[bit] → {} x{times}", if yes { "yes" } else { "no" });
+                        emit_verdict(&app, yes, times);
+                    }
+                    Err(e) => {
+                        eprintln!("[bit] agent error: {e}");
+                        emit_verdict(&app, false, 1);
+                    }
                 }
-                Err(e) => {
-                    eprintln!("[bit] agent error: {e}");
-                    emit_verdict(&app, false, 1);
-                }
-            },
+            }
         }
     });
 }
@@ -680,18 +702,33 @@ pub fn run() {
             let app_data = app.path().app_data_dir()?;
             let stt = Arc::new(stt::Stt::new(stt::model_dir(&app_data)));
             let dragging = Arc::new(AtomicBool::new(false));
+            // The MCP registry is registered TWICE: nested in AppState (for the
+            // commands that reach via `app.state::<AppState>().mcp`) AND as a
+            // top-level managed type (so `app.state::<Registry>()` works from
+            // mcp.rs/agent.rs, which can't name AppState). Both point at the
+            // SAME Arc-backed instance, so this is free and never diverges.
+            let mcp = mcp::Registry::new();
+            app.manage(mcp.clone());
             app.manage(AppState {
                 recorder: audio::Recorder::new(),
                 stt,
                 last_toggle: Mutex::new(Instant::now()),
                 dragging: dragging.clone(),
-                mcp: mcp::Registry::new(),
+                mcp,
             });
 
             // Pre-warm enabled MCP servers in the background so the first voice
             // request doesn't stall on npx cold-start. Failures are non-fatal —
             // the server just contributes no tools until it connects.
             spawn_mcp_prewarm(app.handle().clone());
+
+            // Defense-in-depth: verify the Registry is reachable via the
+            // standalone `app.state::<Registry>()` path that mcp.rs/agent.rs
+            // use. If a future refactor un-manges it, this panics loudly at
+            // startup instead of silently breaking push-to-talk mid-request
+            // (which is the exact bug this guards against).
+            let _: tauri::State<'_, mcp::Registry> = app.state::<mcp::Registry>();
+            eprintln!("[bit] setup ok: MCP registry registered");
 
             // Push-to-talk global shortcut.
             app.global_shortcut().register(talk_shortcut())?;

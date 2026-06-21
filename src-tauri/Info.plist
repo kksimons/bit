@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the bundled app's Info.plist by tauri-bundler (see tauri.conf.json
+  bundle.macOS.info_plist, or the auto-detected Info.plist next to it).
+
+  NSMicrophoneUsageDescription is REQUIRED for macOS to even show the microphone
+  permission prompt. Without it, mic access is silently denied and the recorder
+  gets no input — which is why push-to-talk appeared to hang in "thinking" with
+  no transcript.
+-->
+<plist version="1.0">
+  <dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Bit listens to your voice to transcribe speech locally and act on it.</string>
+  </dict>
+</plist>

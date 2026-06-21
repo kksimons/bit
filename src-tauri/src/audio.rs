@@ -11,6 +11,12 @@ pub struct Recorder {
     recording: Arc<AtomicBool>,
     buffer: Arc<Mutex<Vec<f32>>>,
     sample_rate: Arc<AtomicU32>,
+    /// Set false if the audio stream couldn't start (no device, no mic permission,
+    /// unsupported format…). Lets the toggle path refuse cleanly instead of
+    /// silently hanging in a state that captures nothing.
+    available: Arc<AtomicBool>,
+    /// The reason `available` is false, captured at setup time for the UI.
+    error: Arc<Mutex<Option<String>>>,
 }
 
 impl Recorder {
@@ -18,20 +24,30 @@ impl Recorder {
         let recording = Arc::new(AtomicBool::new(false));
         let buffer = Arc::new(Mutex::new(Vec::<f32>::new()));
         let sample_rate = Arc::new(AtomicU32::new(16_000));
+        let available = Arc::new(AtomicBool::new(true));
+        let error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
         let rec = recording.clone();
         let buf = buffer.clone();
         let sr = sample_rate.clone();
+        let avail = available.clone();
+        let err = error.clone();
+        // Helper: record why the stream failed, then leave `available` false.
+        let fail = move |reason: String| {
+            eprintln!("[bit] audio unavailable: {reason}");
+            *err.lock().unwrap() = Some(reason);
+            avail.store(false, Ordering::Relaxed);
+        };
         std::thread::spawn(move || {
             let host = cpal::default_host();
             let Some(device) = host.default_input_device() else {
-                eprintln!("[bit] no input device");
+                fail("no microphone input device found".into());
                 return;
             };
             let config = match device.default_input_config() {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("[bit] input config error: {e}");
+                    fail(format!("microphone not available ({e}). If macOS never prompted, grant Bit Microphone permission in System Settings → Privacy."));
                     return;
                 }
             };
@@ -71,19 +87,19 @@ impl Recorder {
                     None,
                 ),
                 other => {
-                    eprintln!("[bit] unsupported sample format: {other:?}");
+                    fail(format!("unsupported sample format: {other:?}"));
                     return;
                 }
             };
             let stream = match stream {
                 Ok(s) => s,
                 Err(e) => {
-                    eprintln!("[bit] build input stream error: {e}");
+                    fail(format!("couldn't open microphone ({e}). Grant Bit Microphone permission in System Settings → Privacy if you haven't."));
                     return;
                 }
             };
             if let Err(e) = stream.play() {
-                eprintln!("[bit] stream play error: {e}");
+                fail(format!("couldn't start microphone ({e})"));
                 return;
             }
             // Keep the stream alive for the lifetime of the app.
@@ -96,7 +112,19 @@ impl Recorder {
             recording,
             buffer,
             sample_rate,
+            available,
+            error,
         }
+    }
+
+    /// Did the mic stream come up at all? False means permission denied / no
+    /// device / unsupported — `last_error()` has the reason.
+    pub fn available(&self) -> bool {
+        self.available.load(Ordering::Relaxed)
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.error.lock().unwrap().clone()
     }
 
     pub fn is_recording(&self) -> bool {

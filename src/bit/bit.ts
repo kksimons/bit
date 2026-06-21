@@ -13,6 +13,23 @@ const ROTATION_SPEED: Record<BitState, number> = {
 const TRANSITION_S = 0.3;
 const MIN_SCALE = 0.22;
 
+// --- personality bounce ---
+// On yes/no, the Bit bobs in the direction of its answer: UP for yes, DOWN
+// for no. Bigger answers (“yes yes yes”, times=3) bounce higher and quicker,
+// so emphasis is felt as well as heard. The bounce is an ease-out envelope
+// layered ON TOP of the resting hover-bob, so it composes with the form-change
+// and spin instead of fighting them.
+const BOUNCE_DURATION_S = 0.6;
+const BOUNCE_AMPLITUDE = 0.28; // world-space y units at times=1
+
+interface Bounce {
+  active: boolean;
+  t: number; // seconds since the bounce started
+  direction: 1 | -1; // +1 = yes (up), -1 = no (down)
+  amplitude: number; // scaled by enthusiasm (times)
+  speed: number; // cadence multiplier (more reps = snappier)
+}
+
 interface Transition {
   active: boolean;
   t: number;
@@ -39,6 +56,14 @@ export class Bit {
     t: 0,
     to: "neutral",
     swapped: true,
+  };
+  /// Personality bounce (yes up / no down). Driven by `react`'s `times`.
+  private bounce: Bounce = {
+    active: false,
+    t: 0,
+    direction: 1,
+    amplitude: 0,
+    speed: 1,
   };
   private sounds: Record<"yes" | "no", HTMLAudioElement> = {
     yes: new Audio("/sounds/bit-yes.mp3"),
@@ -93,9 +118,30 @@ export class Bit {
       this.revertTimer = null;
     }
     this.transition = { active: true, t: 0, to: state, swapped: false };
+    // Each yes/no form-snap kicks a bounce in the answer’s direction. Amplitude
+    // and cadence scale with the last `react(times)` call, so “yes yes yes”
+    // bounces bigger and snappier than a single yes.
+    if (state === "yes" || state === "no") {
+      this.startBounce(state);
+    }
     if (revertMs > 0 && (state === "yes" || state === "no")) {
       this.revertTimer = window.setTimeout(() => this.setState("neutral", 0), revertMs);
     }
+  }
+
+  /// Arm a personality bounce for a yes/no snap. Enthusiasm is remembered so
+  /// each repeated snap in a `react` burst carries the same intensity.
+  private enthusiasm = 1; // 1..3, set by react()
+  private startBounce(kind: "yes" | "no") {
+    // 1..3 → amplitude/speed multipliers. times=3 is markedly bigger + snappier.
+    const e = this.enthusiasm;
+    this.bounce = {
+      active: true,
+      t: 0,
+      direction: kind === "yes" ? 1 : -1,
+      amplitude: BOUNCE_AMPLITUDE * (0.7 + (e - 1) * 0.35),
+      speed: 1 + (e - 1) * 0.25,
+    };
   }
 
   getState(): BitState {
@@ -105,6 +151,7 @@ export class Bit {
   /** Say yes/no `times` (1–3) in quick succession — Bit's bit of personality. */
   react(kind: "yes" | "no", times: number) {
     const n = Math.max(1, Math.min(3, Math.round(times)));
+    this.enthusiasm = n; // drives bounce amplitude/cadence for the whole burst
     const interval = 430;
     for (let i = 0; i < n; i++) {
       const last = i === n - 1;
@@ -134,6 +181,24 @@ export class Bit {
     this.material.emissive.setHex(p.emissive);
   }
 
+  /// Advance the personality bounce by `dt` and return its current y offset.
+  /// Shape: one quick hop in the answer’s direction, then settle back — an
+  /// ease-out curve (fast out, slow back) that reads as a lively “yes!” or a
+  /// deflated “no”. Returns 0 when no bounce is active.
+  private bounceOffset(dt: number): number {
+    if (!this.bounce.active) return 0;
+    this.bounce.t += dt * this.bounce.speed;
+    const p = this.bounce.t / BOUNCE_DURATION_S;
+    if (p >= 1) {
+      this.bounce.active = false;
+      return 0;
+    }
+    // sin(πp) peaks at the midpoint and returns to 0 at both ends — a single
+    // smooth hop. Damped slightly so the second half (settle) is gentler.
+    const hop = Math.sin(p * Math.PI);
+    return this.bounce.direction * this.bounce.amplitude * hop;
+  }
+
   private resize() {
     const w = window.innerWidth;
     const h = window.innerHeight;
@@ -150,7 +215,19 @@ export class Bit {
     const speed = ROTATION_SPEED[this.state];
     this.mesh.rotation.y += speed;
     this.mesh.rotation.x += speed * 0.4;
-    this.mesh.position.y = Math.sin(t * 1.5) * 0.12;
+    // Personality rotation deltas (compose with the base spin):
+    //  - no: a gentle side-to-side head-shake (the universal “no” gesture).
+    //  - yes/no base spin already differs per state (see ROTATION_SPEED), so
+    //    yes reads as eager and no as slower/heavier on its own.
+    if (this.state === "no") {
+      this.mesh.rotation.z = Math.sin(t * 14) * 0.09;
+    } else {
+      // ease z back to 0 so the wobble doesn't linger after a no.
+      this.mesh.rotation.z *= 0.85;
+    }
+    // Resting hover-bob is the base; the personality bounce adds on top of it
+    // (so yes bobs up from the hover, no dips below it).
+    this.mesh.position.y = Math.sin(t * 1.5) * 0.12 + this.bounceOffset(dt);
 
     let scale: number;
     if (this.transition.active) {
@@ -177,7 +254,15 @@ export class Bit {
     } else {
       // gentle slow "breathing" at rest (smooth, not jittery)
       scale = this.state === "neutral" ? 1 + Math.sin(t * 1.2) * 0.02 : 1;
-      this.material.emissiveIntensity = 0.85;
+      // yes: enthusiasm glow — brighter when said more emphatically (times 1..3).
+      // no: dimmer, deflated. Both ease back toward neutral over the revert.
+      if (this.state === "yes") {
+        this.material.emissiveIntensity = 0.85 + (this.enthusiasm - 1) * 0.25;
+      } else if (this.state === "no") {
+        this.material.emissiveIntensity = 0.7;
+      } else {
+        this.material.emissiveIntensity = 0.85;
+      }
     }
     this.mesh.scale.setScalar(scale);
 

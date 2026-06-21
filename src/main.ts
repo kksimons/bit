@@ -52,10 +52,14 @@ canvas.addEventListener("pointercancel", endDrag);
 window.addEventListener("keydown", (e) => {
   switch (e.key.toLowerCase()) {
     case "y":
-      bit.setState("yes");
+      // Shift+Y = emphatic triple (“yes yes yes” / “no no no”) for testing the
+      // personality bounce at max enthusiasm without an LLM round-trip.
+      if (e.shiftKey) bit.react("yes", 3);
+      else bit.setState("yes");
       break;
     case "n":
-      bit.setState("no");
+      if (e.shiftKey) bit.react("no", 3);
+      else bit.setState("no");
       break;
     case "t":
       bit.setState("thinking", 0);

@@ -35,6 +35,7 @@ tokio = { version = "1.52.3", features = ["io-util", "net", "sync", "time", "rt"
 reqwest = { version = "0.13.4", features = ["json"] }
 url = "2.5.8"
 socket2 = "0.6.4"
+libc = "0.2.186"
 
 [lints.clippy]
 # `cargo clippy -- -D warnings` (see `bun run lint:rust`) escalates these to errors.
