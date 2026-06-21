@@ -89,6 +89,23 @@ pub fn model_dir(app_data: &Path, model_id: &str) -> PathBuf {
     app_data.join("models").join(model_id)
 }
 
+/// One-time migration: pre-0.2.0 Bit stored Parakeet under the full HuggingFace
+/// repo name (`parakeet-tdt-0.6b-v2`) rather than the model id (`parakeet-v2`).
+/// Rename it into place so existing users keep working instead of being told
+/// to redownload. Idempotent — no-op if already migrated or absent. Best-effort;
+/// a failure just means the user re-downloads via the picker.
+pub fn migrate_legacy_dirs(app_data: &Path) {
+    let old = app_data.join("models").join("parakeet-tdt-0.6b-v2");
+    let new = model_dir(app_data, "parakeet-v2");
+    if old.is_dir() && !new.is_dir() {
+        if let Err(e) = std::fs::rename(&old, &new) {
+            eprintln!("[bit] couldn't migrate parakeet model dir: {e}");
+        } else {
+            println!("[bit] migrated parakeet model dir → parakeet-v2/");
+        }
+    }
+}
+
 /// Are all of this model's files present?
 pub fn model_ready(app_data: &Path, model_id: &str) -> bool {
     let spec = spec(model_id);

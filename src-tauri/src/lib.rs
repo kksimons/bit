@@ -777,8 +777,10 @@ pub fn run() {
             app.set_activation_policy(ActivationPolicy::Accessory);
 
             // Speech-to-text state. The model dir is decided per-active-model
-            // (see stt::model_dir); Stt just needs the app-data root.
+            // (see stt::model_dir); Stt just needs the app-data root. Migrate
+            // any pre-0.2.0 model dir name first so existing users keep working.
             let app_data = app.path().app_data_dir()?;
+            stt::migrate_legacy_dirs(&app_data);
             let stt = Arc::new(stt::Stt::new(app_data));
             let dragging = Arc::new(AtomicBool::new(false));
             // The MCP registry is registered TWICE: nested in AppState (for the
