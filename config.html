@@ -103,9 +103,25 @@
         <h2>Connections</h2>
         <p class="muted">
           Let Bit reach into other apps to answer questions like “do I have unread
-          mail?”. Add a connection below and sign in or paste a token — Bit gets
+          mail?” or “do I have open pull requests?”. Sign in once and Bit gets
           that app’s tools automatically.
         </p>
+
+        <label>
+          Add a service by URL
+          <input
+            id="mcp_url"
+            type="text"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="https://mcp.notion.com/mcp"
+          />
+        </label>
+        <div class="row">
+          <button type="button" id="mcp_url_add">Add &amp; sign in</button>
+        </div>
+        <p class="muted" id="mcp_url_status"></p>
+
         <div id="mcp_presets" class="row"></div>
         <div id="mcp_list"></div>
         <details class="advanced">
@@ -163,6 +179,25 @@
             <button type="button" id="mcp_cancel" class="ghost">Cancel</button>
           </div>
           <p class="muted" id="mcp_editor_status"></p>
+        </div>
+      </div>
+
+      <!-- MCP per-tool toggles modal (opened from a connection card) -->
+      <div id="mcp_tools_backdrop" class="backdrop hidden">
+        <div class="editor">
+          <div class="row spread">
+            <h2 id="mcp_tools_title">Tools</h2>
+            <button type="button" id="mcp_tools_close" class="ghost">✕</button>
+          </div>
+          <p class="muted" id="mcp_tools_desc"></p>
+          <div class="row">
+            <button type="button" id="mcp_tools_disable_dest" class="ghost">
+              Disable all destructive
+            </button>
+            <button type="button" id="mcp_tools_enable_all" class="ghost">Enable all</button>
+          </div>
+          <div id="mcp_tools_list" class="tool-list"></div>
+          <p class="muted" id="mcp_tools_status"></p>
         </div>
       </div>
 

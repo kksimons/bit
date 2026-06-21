@@ -10,6 +10,12 @@
 //! request→response is a simple blocking write-line/read-until-matching-id. Reads
 //! time out (a wedged server can't hang the agent thread forever), and a failing
 //! connection is dropped so the next call reconnects from scratch.
+//!
+//! HTTP (remote, OAuth) servers live in `mcp/http.rs` and use the rmcp SDK; the
+//! stdio client in this file handles only local subprocess servers.
+
+pub mod http;
+pub mod oauth;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,23 +46,46 @@ const MAX_OUTPUT: usize = 4000;
 /// One configured MCP server, persisted in `mcp.json`. The "preset" flag marks
 /// gallery entries (Gmail, …) so the UI can render them distinctly from a raw
 /// Custom server; it carries no behavioral meaning at runtime.
+///
+/// Two transports: `stdio` (a local subprocess like the Gmail preset) or `http`
+/// (a remote Streamable-HTTP server using OAuth, e.g. Notion / Sentry / GitHub).
+/// Stdio uses `command`/`args`/`env`; http uses `url` and a stored OAuth token.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct McpServer {
     pub name: String,
+    /// "stdio" (default) or "http". Controls which client the registry uses.
+    #[serde(default = "default_transport")]
+    pub transport: String,
+    /// stdio only: the executable to spawn (e.g. "npx").
+    #[serde(default)]
     pub command: String,
+    /// stdio only: args passed to `command`.
     #[serde(default)]
     pub args: Vec<String>,
+    /// stdio only: environment variables for the subprocess (e.g. credentials).
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// http only: the remote server's Streamable-HTTP endpoint.
+    #[serde(default)]
+    pub url: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Gallery preset (e.g. "gmail"). Blank for user-authored Custom servers.
     #[serde(default)]
     pub preset: String,
+    /// Tools the user has turned off for this server (denylist). Stored by the
+    /// server-side tool name (NOT the mcp__ namespaced form). Default empty =
+    /// all tools on. Disabled tools are neither advertised nor callable.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_transport() -> String {
+    "stdio".into()
 }
 
 fn store_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -92,6 +121,23 @@ pub fn upsert(app: &tauri::AppHandle, server: McpServer) -> Result<McpServer, St
     }
     save_all(app, &all)?;
     Ok(server)
+}
+
+/// Replace one server's disabled-tool denylist. Used by the per-tool toggles
+/// (and “Disable all destructive”) — cheap: just rewrites `mcp.json`, no
+/// reconnect needed since filtering happens at advertise/call time.
+pub fn set_disabled_tools(
+    app: &tauri::AppHandle,
+    name: &str,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    let mut all = load_all(app);
+    let server = all
+        .iter_mut()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("no MCP server named '{name}'"))?;
+    server.disabled_tools = disabled;
+    save_all(app, &all)
 }
 
 pub fn delete(app: &tauri::AppHandle, name: &str) -> Result<(), String> {
@@ -266,11 +312,43 @@ impl Drop for Connection {
     }
 }
 
+impl Connection {
+    /// Call a server-side tool by name. Returns the flattened text content.
+    fn call_tool(&mut self, tool: &str, args: &Value) -> Result<String, String> {
+        let result = self.request("tools/call", json!({ "name": tool, "arguments": args }))?;
+        Ok(flatten_mcp_content(&result))
+    }
+}
+
+/// A live connection regardless of transport. Both transports cache their
+/// `tools/list` as the same raw serde Values, so the registry and `tool_defs`
+/// never need to know which is which. Only `call` differs.
+enum AnyConn {
+    Stdio(Connection),
+    Http(crate::mcp::http::HttpConnection),
+}
+
+impl AnyConn {
+    fn tools(&self) -> &[Value] {
+        match self {
+            AnyConn::Stdio(c) => &c.tools,
+            AnyConn::Http(c) => c.tools(),
+        }
+    }
+
+    fn call(&mut self, tool: &str, args: &Value) -> Result<String, String> {
+        match self {
+            AnyConn::Stdio(c) => c.call_tool(tool, args),
+            AnyConn::Http(c) => c.call(tool, args),
+        }
+    }
+}
+
 /// Entry in the global registry: either a live connection or the last error
 /// that prevented establishing one (so the UI can show "error: …" and the agent
 /// gets a clean Err rather than a silent reconnect on every call).
 enum Slot {
-    Connected(Connection),
+    Connected(AnyConn),
     /// Cached error from the last failed connect; cleared on next retry.
     Error(String),
 }
@@ -307,19 +385,35 @@ impl Registry {
         inner.remove(name);
     }
 
+    /// Establish a fresh connection to `server`, picking the transport by
+    /// `server.transport`. Stdio spawns the subprocess; http loads stored OAuth
+    /// credentials and connects via rmcp.
+    fn connect(app: &tauri::AppHandle, server: &McpServer) -> Result<AnyConn, String> {
+        match server.transport.as_str() {
+            "http" => {
+                let dir = app
+                    .path()
+                    .app_config_dir()
+                    .map_err(|e| format!("no config dir: {e}"))?;
+                crate::mcp::http::HttpConnection::connect(&dir, server).map(AnyConn::Http)
+            }
+            _ => Connection::connect(server).map(AnyConn::Stdio),
+        }
+    }
+
     /// Ensure the slot holds a live connection; return the cached tools if so.
     /// Establishes (or re-establishes) the connection lazily on first use or
     /// after a prior failure.
-    pub fn ensure(&self, server: &McpServer) -> Result<Vec<Value>, String> {
+    pub fn ensure(&self, app: &tauri::AppHandle, server: &McpServer) -> Result<Vec<Value>, String> {
         let slot = self.slot(&server.name);
         let mut guard = slot.lock().unwrap();
         match &mut *guard {
             Slot::Connected(_) => {}
             Slot::Error(prev) => {
                 // Try to (re)connect; on failure, cache the new error.
-                match Connection::connect(server) {
+                match Self::connect(app, server) {
                     Ok(conn) => {
-                        let tools = conn.tools.clone();
+                        let tools = conn.tools().to_vec();
                         *guard = Slot::Connected(conn);
                         return Ok(tools);
                     }
@@ -332,7 +426,7 @@ impl Registry {
         }
         // Already connected: return its cached tools.
         if let Slot::Connected(conn) = &*guard {
-            Ok(conn.tools.clone())
+            Ok(conn.tools().to_vec())
         } else {
             unreachable!("guard was just matched as Connected")
         }
@@ -344,7 +438,7 @@ impl Registry {
         let slot = self.slot(&server.name);
         let guard = slot.lock().unwrap();
         match &*guard {
-            Slot::Connected(conn) => conn.tools.len(),
+            Slot::Connected(conn) => conn.tools().len(),
             _ => 0,
         }
     }
@@ -372,7 +466,13 @@ impl Registry {
 
     /// Call a tool on a server. Establishes the connection if needed. The tool
     /// `name` is the server-side name (NOT the mcp__ namespaced form).
-    fn call_tool(&self, server: &McpServer, tool: &str, args: &Value) -> Result<String, String> {
+    fn call_tool(
+        &self,
+        app: &tauri::AppHandle,
+        server: &McpServer,
+        tool: &str,
+        args: &Value,
+    ) -> Result<String, String> {
         let slot = self.slot(&server.name);
         // (Re)connect if the slot isn't holding a live connection. Drop the
         // slot-level lock while we (re)connect so the UI's status reads don't
@@ -380,7 +480,7 @@ impl Registry {
         {
             let needs_connect = matches!(*slot.lock().unwrap(), Slot::Error(_));
             if needs_connect {
-                match Connection::connect(server) {
+                match Self::connect(app, server) {
                     Ok(conn) => {
                         *slot.lock().unwrap() = Slot::Connected(conn);
                     }
@@ -395,9 +495,7 @@ impl Registry {
         // wedged/dead and drop it so the next call reconnects cleanly.
         let mut guard = slot.lock().unwrap();
         let outcome = match &mut *guard {
-            Slot::Connected(conn) => conn
-                .request("tools/call", json!({ "name": tool, "arguments": args }))
-                .map(|c| flatten_mcp_content(&c)),
+            Slot::Connected(conn) => conn.call(tool, args),
             Slot::Error(_) => unreachable!("upgraded to Connected above"),
         };
         if let Err(e) = &outcome {
@@ -410,7 +508,7 @@ impl Registry {
 /// Pull readable text out of an MCP `tools/call` result, which is a list of
 /// content blocks (`{type:"text", text:"…"}`, etc.). Flatten all text blocks,
 /// separated by newlines; cap the total to keep the model context bounded.
-fn flatten_mcp_content(result: &Value) -> String {
+pub fn flatten_mcp_content(result: &Value) -> String {
     let mut out = String::new();
     if let Some(arr) = result.get("content").and_then(|c| c.as_array()) {
         for block in arr {
@@ -447,7 +545,7 @@ pub fn tool_defs(app: &tauri::AppHandle) -> Vec<Value> {
         if !server.enabled {
             continue;
         }
-        let tools = match registry.ensure(&server) {
+        let tools = match registry.ensure(app, &server) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("[bit] mcp '{}': {e}", server.name);
@@ -458,6 +556,16 @@ pub fn tool_defs(app: &tauri::AppHandle) -> Vec<Value> {
             let Some(raw_name) = tool.get("name").and_then(|n| n.as_str()) else {
                 continue;
             };
+            // Denylist: the user turned this tool off in Settings. Skipping it
+            // here means the model never sees it — it can't call what it can't
+            // name. (call() refuses it as a backstop too.)
+            if server
+                .disabled_tools
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(raw_name))
+            {
+                continue;
+            }
             // MCP uses `inputSchema` (camelCase); Anthropic/OpenAI want
             // `input_schema` / `parameters`. Normalize once, here.
             let schema = tool
@@ -480,16 +588,106 @@ pub fn tool_defs(app: &tauri::AppHandle) -> Vec<Value> {
     out
 }
 
+/// Verbs whose presence at the start of a tool name strongly suggests the
+/// tool removes/destroys data. Conservative on purpose — no `remove`, `clear`,
+/// `reset` (too many false positives like “remove from cart”). This is a
+/// FALLBACK for servers that omit MCP `annotations`; annotation hints win when
+/// present.
+const DESTRUCTIVE_PREFIXES: &[&str] = &[
+    "delete", "destroy", "drop", "purge", "erase", "wipe", "trash",
+];
+
+/// Heuristic + spec union: should this tool be flagged possibly-destructive?
+/// Used by the UI for the ⚠ badge and the “Disable all destructive” button.
+/// Honors real `annotations` when the server provides them (readOnlyHint wins
+/// as a non-destructive override; destructiveHint forces it on), then falls
+/// back to a name-prefix check for servers that don’t annotate (Gmail).
+pub fn is_destructive(tool: &Value) -> bool {
+    let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let ann = tool.get("annotations");
+    // Spec: readOnlyHint=true means no side effects at all — never destructive.
+    if let Some(read_only) = ann
+        .and_then(|a| a.get("readOnlyHint"))
+        .and_then(|v| v.as_bool())
+    {
+        if read_only {
+            return false;
+        }
+    }
+    // Explicit destructiveHint from the server: trust it either way.
+    if let Some(destructive) = ann
+        .and_then(|a| a.get("destructiveHint"))
+        .and_then(|v| v.as_bool())
+    {
+        return destructive;
+    }
+    // No usable annotation — fall back to the name heuristic.
+    let lower = name.to_lowercase();
+    let after_prefix = DESTRUCTIVE_PREFIXES
+        .iter()
+        .find_map(|p| lower.strip_prefix(p))
+        .map(|rest| rest.is_empty() || !rest.chars().next().unwrap_or(' ').is_alphanumeric());
+    after_prefix.unwrap_or(false)
+}
+
 /// `mcp__<server>__<tool>` — the form we advertise and that the model calls.
 pub fn namespaced(server: &str, tool: &str) -> String {
     format!("mcp__{server}__{tool}")
 }
-
 /// Split a namespaced tool name back into (server, tool).
 fn parse_namespaced(full: &str) -> Option<(&str, &str)> {
     let rest = full.strip_prefix("mcp__")?;
     let (server, tool) = rest.split_once("__")?;
     Some((server, tool))
+}
+
+/// One tool's UI-facing metadata: name, short description, destructive flag,
+/// and whether the user currently has it enabled (per the server's denylist).
+#[derive(serde::Serialize, Clone)]
+pub struct ToolView {
+    pub name: String,
+    pub description: String,
+    pub destructive: bool,
+    pub enabled: bool,
+}
+
+/// List a server's tools for the “Manage tools” UI. Connects if needed (so the
+/// list is fresh) but doesn't filter by disabled_tools — the UI shows ALL tools
+/// with their enabled state, so the user can re-enable things. Returns Err if
+/// the server can't be reached (the UI surfaces it).
+pub fn tools_view(app: &tauri::AppHandle, name: &str) -> Result<Vec<ToolView>, String> {
+    let server = load_all(app)
+        .into_iter()
+        .find(|s| s.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| format!("no MCP server named '{name}'"))?;
+    let registry = app.state::<Registry>();
+    let tools = registry.ensure(app, &server)?;
+    Ok(tools
+        .iter()
+        .map(|t| {
+            let tname = t
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            ToolView {
+                enabled: !server
+                    .disabled_tools
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(&tname)),
+                destructive: is_destructive(t),
+                description: t
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
+                name: tname,
+            }
+        })
+        .collect())
 }
 
 /// Execute a namespaced `mcp__…` tool call. Routes to the right server, falls
@@ -505,8 +703,18 @@ pub fn call(app: &tauri::AppHandle, full_name: &str, args: &Value) -> Result<Str
     if !server.enabled {
         return Err(format!("MCP server '{}' is disabled", server.name));
     }
+    if server
+        .disabled_tools
+        .iter()
+        .any(|d| d.eq_ignore_ascii_case(tool))
+    {
+        return Err(format!(
+            "MCP tool '{}__{tool}' has been turned off in Bit's Connections settings",
+            server.name
+        ));
+    }
     let registry = app.state::<Registry>();
-    registry.call_tool(&server, tool, args)
+    registry.call_tool(app, &server, tool, args)
 }
 
 // ============================ presets ============================
@@ -600,6 +808,62 @@ mod tests {
         assert!(out.len() < MAX_OUTPUT + 64);
     }
 
+    #[test]
+    fn destructive_annotation_wins() {
+        // Server says destructive=true → flagged, regardless of name.
+        assert!(is_destructive(&json!({
+            "name": "send_message",
+            "annotations": { "destructiveHint": true }
+        })));
+        // Server says destructive=false → not flagged, even if name starts with delete.
+        assert!(!is_destructive(&json!({
+            "name": "delete_safe_copy",
+            "annotations": { "destructiveHint": false }
+        })));
+    }
+
+    #[test]
+    fn readonly_is_never_destructive() {
+        // readOnlyHint=true overrides everything.
+        assert!(!is_destructive(&json!({
+            "name": "delete_everything",
+            "annotations": { "readOnlyHint": true, "destructiveHint": true }
+        })));
+    }
+
+    #[test]
+    fn destructive_name_heuristic_fallback() {
+        // No annotations → name heuristic (servers like gmail-mcp-imap omit them).
+        for name in [
+            "delete_email",
+            "destroy_all",
+            "drop_table",
+            "purge_cache",
+            "wipe_disk",
+            "trash_item",
+            "erase_history",
+        ] {
+            assert!(
+                is_destructive(&json!({ "name": name })),
+                "{name} should be destructive"
+            );
+        }
+        // Non-destructive names + the heuristic word as a non-prefix → safe.
+        for name in [
+            "send_email",
+            "get_primary_emails",
+            "search",
+            "list_labels",
+            "undeleted",
+            "nodelete",
+        ] {
+            assert!(
+                !is_destructive(&json!({ "name": name })),
+                "{name} should NOT be destructive"
+            );
+        }
+    }
+
     /// End-to-end handshake against the REAL gmail-mcp-imap server.
     /// Skipped by default (needs npx + network to fetch the package) — run with
     /// `cargo test -- --ignored mcp`. Dummy creds are fine: the MCP handshake +
@@ -620,6 +884,7 @@ mod tests {
         }
         let server = McpServer {
             name: "gmail".into(),
+            transport: "stdio".into(),
             command: "npx".into(),
             args: vec!["-y".into(), "gmail-mcp-imap".into()],
             env: [
@@ -631,12 +896,16 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            url: String::new(),
             enabled: true,
             preset: "gmail".into(),
+            disabled_tools: Vec::new(),
         };
-        let registry = Registry::new();
-        let tools = registry.ensure(&server).expect("handshake should succeed");
-        let names: Vec<&str> = tools
+        // Exercise the stdio client directly (no AppHandle needed in a unit
+        // test): spawn → initialize → tools/list.
+        let conn = Connection::connect(&server).expect("handshake should succeed");
+        let names: Vec<&str> = conn
+            .tools
             .iter()
             .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
             .collect();
@@ -653,6 +922,5 @@ mod tests {
             "expected many tools, got {}: {names:?}",
             names.len()
         );
-        assert!(registry.is_connected("gmail"));
     }
 }

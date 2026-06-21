@@ -46,7 +46,7 @@ opens Settings and quits.
 - `src/` — the overlay frontend (Three.js Bit renderer) and the Settings UI
 - `src-tauri/src/` — the Rust core: agent loop, tools, MCP client, STT, motion
 - `config.html` / `src/config/` — the Settings window
-- App state on disk lives under `~/Library/Application Support/ca.magsolar.bit/`
+- App state on disk lives under `~/Library/Application Support/ca.kylesimons.bit/`
   (settings, API key, workflows, MCP servers)
 
 ### Lint, typecheck, tests

@@ -1,11 +1,19 @@
 use crate::config::AgentConfig;
 use crate::{tools, workflows};
 use serde_json::{json, Value};
+use tauri::Manager;
 
 const SYSTEM: &str = "You are Bit, a desktop companion: a floating geometric polyhedron. \
 Act on the user's Mac using the tools available to you (run their saved workflows, open apps and \
 URLs, toggle Focus/Do Not Disturb, and — if enabled — other actions). When the user asks for \
 something, DO it by calling the appropriate tool(s) before answering. \
+\
+You may be connected to external services (email, docs, issue trackers, etc.) via MCP. Each \
+connected service exposes tools named mcp__<service>__<tool>. When the user asks about one of \
+these services — e.g. \"do I have unread email?\", \"any new issues?\", \"search my docs\" — call the \
+matching tool to check, then answer from its result. Prefer read-only tools (search/list/get) to \
+answer \"do I have…\" questions. Disabled tools are unavailable; never claim you checked \
+something you couldn't. \
 \
 You manage named multi-step workflows: when the request matches a saved workflow (by name or \
 trigger phrase, e.g. \"let's work on Heatsink\"), call run_workflow. When asked to set up or change \
@@ -60,6 +68,35 @@ fn workflows_context(app: &tauri::AppHandle) -> String {
     s
 }
 
+/// List the user's connected MCP services so the model knows which external
+/// apps it can reach. Only counts servers whose tools are actually live (enabled
+/// AND connected) — that's exactly what `tool_defs` advertises, so the prompt
+/// never claims a service is available when its tools aren't in the list.
+fn mcp_context(app: &tauri::AppHandle) -> String {
+    let registry = app.state::<crate::mcp::Registry>();
+    let mut lines: Vec<String> = Vec::new();
+    for s in crate::mcp::load_all(app) {
+        if !s.enabled {
+            continue;
+        }
+        let n = registry.tool_count(&s);
+        if n > 0 {
+            lines.push(format!(
+                "  - {} ({} tools, call them as mcp__{}__<tool>)",
+                s.name, n, s.name
+            ));
+        }
+    }
+    if lines.is_empty() {
+        "\n\nNo external services are connected yet.".into()
+    } else {
+        format!(
+            "\n\nConnected services you can query via their mcp__<service>__ tools:\n{}",
+            lines.join("\n")
+        )
+    }
+}
+
 /// Returns (verdict, times): true=yes/false=no, repeated 1..=3 for emphasis.
 pub fn ask(
     app: &tauri::AppHandle,
@@ -99,7 +136,7 @@ fn ask_anthropic(
 ) -> Result<(bool, u8), String> {
     let url = format!("{}/v1/messages", base_url(cfg));
     let headers = anthropic_headers(cfg);
-    let system = format!("{SYSTEM}{}", workflows_context(app));
+    let system = format!("{SYSTEM}{}{}", workflows_context(app), mcp_context(app));
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": transcript })];
 
     for _ in 0..MAX_TURNS {
@@ -198,7 +235,7 @@ fn ask_openai(
 ) -> Result<(bool, u8), String> {
     let url = format!("{}/chat/completions", base_url(cfg));
     let headers = openai_headers(cfg);
-    let system = format!("{SYSTEM}{}", workflows_context(app));
+    let system = format!("{SYSTEM}{}{}", workflows_context(app), mcp_context(app));
     let mut messages: Vec<Value> = vec![
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": transcript }),

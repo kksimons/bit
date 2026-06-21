@@ -389,6 +389,36 @@ textarea:focus {
   color: var(--muted);
 }
 
+.tool-list {
+  margin-top: 10px;
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid #25333f;
+  border-radius: 8px;
+}
+
+.tool-row {
+  display: block;
+  padding: 8px 12px;
+  border-bottom: 1px solid #1d2733;
+  margin: 0;
+  font-size: 13px;
+}
+
+.tool-row:last-child {
+  border-bottom: 0;
+}
+
+.tool-row input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.tag.warn {
+  color: #ffb053;
+  border-color: #5a4326;
+}
+
 footer {
   margin-top: 18px;
   font-size: 12px;

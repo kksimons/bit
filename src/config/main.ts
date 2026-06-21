@@ -513,22 +513,34 @@ interface PresetView {
 }
 interface McpServerView {
   name: string;
+  transport: string;
   command: string;
   args: string[];
   env: Record<string, string>;
+  url: string;
   enabled: boolean;
   preset: string;
+  disabled_tools: string[];
   connected: boolean;
   tool_count: number;
   error: string | null;
 }
 interface McpServer {
   name: string;
+  transport: string;
   command: string;
   args: string[];
   env: Record<string, string>;
+  url: string;
   enabled: boolean;
   preset: string;
+  disabled_tools: string[];
+}
+interface ToolView {
+  name: string;
+  description: string;
+  destructive: boolean;
+  enabled: boolean;
 }
 
 let presets: PresetView[] = [];
@@ -576,13 +588,15 @@ function renderMcpServers() {
       : s.error
         ? `<span class="conn-status err">${escapeHtml(s.error)}</span>`
         : `<span class="conn-status pending">Not connected</span>`;
+    const badge = s.transport === "http" ? ` <span class="tag">web</span>` : "";
     card.innerHTML = `
       <div class="row spread">
-        <b>${escapeHtml(s.name)}</b>
+        <b>${escapeHtml(s.name)}${badge}</b>
         <label class="switch"><input type="checkbox" ${s.enabled ? "checked" : ""}/> on</label>
       </div>
       <div class="conn-status">${status}</div>
       <div class="row">
+        <button class="tools ghost">Manage tools (${s.tool_count})</button>
         <button class="test ghost">Test connection</button>
         <button class="del ghost danger">Remove</button>
       </div>`;
@@ -594,6 +608,7 @@ function renderMcpServers() {
       }).catch(() => {});
       await loadMcpServers();
     });
+    card.querySelector(".tools")?.addEventListener("click", () => openToolsEditor(s.name));
     card.querySelector(".test")?.addEventListener("click", async (el) => {
       const btn = el.currentTarget as HTMLButtonElement;
       btn.disabled = true;
@@ -621,11 +636,14 @@ function renderMcpServers() {
 function toServer(s: McpServerView): McpServer {
   return {
     name: s.name,
+    transport: s.transport,
     command: s.command,
     args: s.args,
     env: s.env,
+    url: s.url,
     enabled: s.enabled,
     preset: s.preset,
+    disabled_tools: s.disabled_tools,
   };
 }
 
@@ -675,11 +693,14 @@ async function savePreset() {
   }
   const server: McpServer = {
     name: editingPreset.id,
+    transport: "stdio",
     command: editingPreset.command,
     args: editingPreset.args,
     env,
+    url: "",
     enabled: true,
     preset: editingPreset.id,
+    disabled_tools: [],
   };
   $("mcp_editor_status").textContent = "Connecting…";
   try {
@@ -694,6 +715,79 @@ async function savePreset() {
 $("mcp_save").addEventListener("click", savePreset);
 $("mcp_cancel").addEventListener("click", closePresetEditor);
 $("mcp_editor_close").addEventListener("click", closePresetEditor);
+
+// ================= Per-tool toggles =================
+// Modal listing a server's tools with checkboxes + a “⚠ destructive” badge on
+// any Bit flags possibly-destructive (real annotations when the server gives
+// them, else a name heuristic). Toggling sends the full new denylist; saving is
+// instant (no reconnect — filtering happens at advertise/call time).
+let toolsServer: string | null = null;
+let toolsList: ToolView[] = [];
+
+async function openToolsEditor(name: string) {
+  toolsServer = name;
+  toolsList = [];
+  $("mcp_tools_title").textContent = `${name} · tools`;
+  $("mcp_tools_desc").textContent =
+    "Turn off tools you don’t want the agent to have. ⚠ marks tools that may change or remove data.";
+  $("mcp_tools_status").textContent = "Loading…";
+  renderToolsList();
+  $("mcp_tools_backdrop").classList.remove("hidden");
+  try {
+    toolsList = await invoke<ToolView[]>("get_mcp_tools", { name });
+    // Show destructive first so the dangerous ones are easy to find/disable.
+    toolsList.sort((a, b) => Number(b.destructive) - Number(a.destructive));
+    $("mcp_tools_status").textContent = `${toolsList.length} tools`;
+  } catch (e) {
+    $("mcp_tools_status").textContent = `Couldn’t list tools: ${e}`;
+  }
+  renderToolsList();
+}
+
+function closeToolsEditor() {
+  toolsServer = null;
+  toolsList = [];
+  $("mcp_tools_backdrop").classList.add("hidden");
+}
+
+function renderToolsList() {
+  const root = $("mcp_tools_list");
+  root.innerHTML = "";
+  for (const t of toolsList) {
+    const row = document.createElement("label");
+    row.className = "tool-row";
+    const warn = t.destructive ? ` <span class="tag warn">⚠ destructive</span>` : "";
+    row.innerHTML = `<input type="checkbox" ${t.enabled ? "checked" : ""}/> <b>${escapeHtml(t.name)}</b>${warn}<br/><span class="muted small">${escapeHtml(t.description)}</span>`;
+    row.querySelector<HTMLInputElement>("input")?.addEventListener("change", (e) => {
+      t.enabled = (e.target as HTMLInputElement).checked;
+      void persistTools();
+    });
+    root.appendChild(row);
+  }
+}
+
+async function persistTools() {
+  if (!toolsServer) return;
+  // disabled = everything not currently enabled (the denylist).
+  const disabled = toolsList.filter((t) => !t.enabled).map((t) => t.name);
+  try {
+    await invoke("set_mcp_disabled_tools", { name: toolsServer, disabled });
+  } catch (e) {
+    $("mcp_tools_status").textContent = `Couldn’t save: ${e}`;
+  }
+}
+
+$("mcp_tools_close").addEventListener("click", closeToolsEditor);
+$("mcp_tools_disable_dest")?.addEventListener("click", async () => {
+  for (const t of toolsList) if (t.destructive) t.enabled = false;
+  renderToolsList();
+  await persistTools();
+});
+$("mcp_tools_enable_all")?.addEventListener("click", async () => {
+  for (const t of toolsList) t.enabled = true;
+  renderToolsList();
+  await persistTools();
+});
 
 // Advanced: custom stdio server. Split the args + env text fields into arrays/map.
 $("mcp_custom_add")?.addEventListener("click", async () => {
@@ -713,11 +807,14 @@ $("mcp_custom_add")?.addEventListener("click", async () => {
   }
   const server: McpServer = {
     name,
+    transport: "stdio",
     command,
     args: argsText ? argsText.split(/\s+/) : [],
     env,
+    url: "",
     enabled: true,
     preset: "",
+    disabled_tools: [],
   };
   status.textContent = "Connecting…";
   try {
@@ -733,7 +830,51 @@ $("mcp_custom_add")?.addEventListener("click", async () => {
   }
 });
 
-// ================= Launch on startup =================
+// Add a remote (HTTP) MCP server by URL. This kicks off the OAuth flow: the
+// backend opens a browser for sign-in and runs a loopback callback server on
+// :8473. Name defaults to the URL host so users only type one thing.
+const deriveName = (url: string): string => {
+  try {
+    return new URL(url).hostname.replace(/^mcp\./, "").split(".")[0] || "service";
+  } catch {
+    return "service";
+  }
+};
+
+$("mcp_url_add")?.addEventListener("click", async () => {
+  const urlInput = elInput("mcp_url");
+  const url = urlInput.value.trim();
+  const status = $("mcp_url_status");
+  if (!url) {
+    status.textContent = "Paste a service URL first.";
+    return;
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    status.textContent = "URL should start with http:// or https://";
+    return;
+  }
+  const name = deriveName(url);
+  status.textContent = "Opening your browser to sign in…";
+  const btn = $("mcp_url_add") as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+  try {
+    // Blocks until the user signs in (or 5min timeout). The backend opens the
+    // browser itself; the user just needs to complete consent there. Returns
+    // the URL actually used (may differ from input if /sse → /mcp was applied).
+    const resolved = await invoke<string>("add_http_server", { name, url });
+    status.textContent =
+      resolved !== url
+        ? `Connected (using ${resolved} — Bit rewrote the /sse URL to /mcp, which it supports).`
+        : "Connected. See the connection status above.";
+    urlInput.value = "";
+    await loadMcpServers();
+  } catch (e) {
+    status.textContent = `Couldn’t connect: ${e}`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+
 // The backend wraps the autostart plugin in its own commands so it can refuse in
 // dev builds (the debug binary can’t find its UI after a reboot). Nothing to
 // persist — the OS registration is the source of truth.

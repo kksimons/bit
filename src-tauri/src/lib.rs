@@ -1,7 +1,7 @@
 mod agent;
 mod audio;
 mod config;
-mod mcp;
+pub mod mcp;
 mod motion;
 mod stt;
 mod tools;
@@ -220,9 +220,11 @@ fn end_drag(app: tauri::AppHandle) {
 #[derive(serde::Serialize)]
 struct McpServerView {
     name: String,
+    transport: String,
     command: String,
     args: Vec<String>,
     env: std::collections::BTreeMap<String, String>,
+    url: String,
     enabled: bool,
     preset: String,
     connected: bool,
@@ -246,9 +248,11 @@ fn get_mcp_servers(app: tauri::AppHandle) -> Vec<McpServerView> {
                 connected,
                 error: registry.last_error(&s.name),
                 name: s.name.clone(),
+                transport: s.transport.clone(),
                 command: s.command,
                 args: s.args,
                 env: s.env,
+                url: s.url,
                 enabled: s.enabled,
                 preset: s.preset,
             }
@@ -273,7 +277,41 @@ fn save_mcp_server(
 #[tauri::command]
 fn delete_mcp_server(app: tauri::AppHandle, name: String) -> Result<(), String> {
     app.state::<AppState>().mcp.invalidate(&name);
+    // Also remove any stored OAuth token for an http server so it’s fully gone.
+    if let Some(path) = mcp::oauth::FileCredentialStore::path_for(&app, &name) {
+        let _ = std::fs::remove_file(path);
+    }
     mcp::delete(&app, &name)
+}
+
+/// Add a remote (HTTP) MCP server via the OAuth flow: discover → register →
+/// open browser for sign-in → capture the loopback callback → persist token.
+/// On success the server is saved (enabled) and pre-warmed. The caller in the
+/// UI just supplies a name + URL — this is the one-line “Add a service” UX.
+#[tauri::command]
+fn add_http_server(app: tauri::AppHandle, name: String, url: String) -> Result<String, String> {
+    // Run OAuth first; if the user bails or it fails, we save nothing.
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| format!("no config dir: {e}"))?;
+    // run_oauth_flow normalizes the URL (e.g. /sse → /mcp) and returns the one
+    // it actually used; save THAT so the token's audience matches connect.
+    let resolved_url = mcp::http::run_oauth_flow(&dir, &name, &url)?;
+    let server = mcp::McpServer {
+        name,
+        transport: "http".into(),
+        command: String::new(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        url: resolved_url.clone(),
+        enabled: true,
+        preset: String::new(),
+        disabled_tools: Vec::new(),
+    };
+    mcp::upsert(&app, server)?;
+    spawn_mcp_prewarm(app);
+    Ok(resolved_url)
 }
 
 /// Probe one server: connect now, run tools/list, and report status. Lets the
@@ -289,7 +327,30 @@ fn test_mcp_server(app: tauri::AppHandle, name: String) -> Result<usize, String>
     }
     // Force a fresh connect attempt (drops any cached error).
     app.state::<AppState>().mcp.invalidate(&name);
-    app.state::<AppState>().mcp.ensure(&server).map(|t| t.len())
+    app.state::<AppState>()
+        .mcp
+        .ensure(&app, &server)
+        .map(|t| t.len())
+}
+
+/// List one server's tools with their enabled + destructive state, for the
+/// “Manage tools” UI. Connects if needed.
+#[tauri::command]
+fn get_mcp_tools(app: tauri::AppHandle, name: String) -> Result<Vec<mcp::ToolView>, String> {
+    mcp::tools_view(&app, &name)
+}
+
+/// Toggle a single tool on/off, OR bulk-replace the whole denylist. `disabled`
+/// is the FULL new denylist (server-side tool names) — the UI computes it
+/// locally and sends the complete set, which keeps this command simple and
+/// idempotent. Cheap: rewrites `mcp.json` only, no reconnect.
+#[tauri::command]
+fn set_mcp_disabled_tools(
+    app: tauri::AppHandle,
+    name: String,
+    disabled: Vec<String>,
+) -> Result<(), String> {
+    mcp::set_disabled_tools(&app, &name, disabled)
 }
 
 /// One credential field a preset asks the UI to collect.
@@ -346,7 +407,7 @@ fn spawn_mcp_prewarm(app: tauri::AppHandle) {
             if !server.enabled {
                 continue;
             }
-            if let Err(e) = registry.ensure(&server) {
+            if let Err(e) = registry.ensure(&app, &server) {
                 eprintln!("[bit] mcp '{}': {e}", server.name);
             }
         }
@@ -700,6 +761,9 @@ pub fn run() {
             save_mcp_server,
             delete_mcp_server,
             test_mcp_server,
+            add_http_server,
+            get_mcp_tools,
+            set_mcp_disabled_tools,
             get_mcp_presets,
             autostart_state,
             set_autostart
