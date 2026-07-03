@@ -505,4 +505,94 @@ mod tests {
         let out = recall_from(d.path(), None, 5);
         assert_eq!(out.matches("asked").count(), 5, "got: {out}");
     }
+
+    #[test]
+    fn multiple_tool_calls_recalled_in_chronological_order() {
+        // A multi-step command: list_boards then create_card, then the ask verdict.
+        let d = tmp();
+        log_tool_call_to(
+            d.path(),
+            "mcp__fizzy__list_boards",
+            &json!({}),
+            r#"{"boards":["MAG Solar"]}"#,
+            false,
+            120,
+        );
+        log_tool_call_to(
+            d.path(),
+            "mcp__fizzy__create_card",
+            &json!({"board":"MAG Solar","title":"fix panel"}),
+            r#"{"number":42}"#,
+            false,
+            350,
+        );
+        log_ask_to(
+            d.path(),
+            "create a card fix panel on MAG Solar",
+            "yes",
+            1,
+            2,
+            1200,
+            None,
+        );
+
+        let out = recall_from(d.path(), None, 10);
+        // All three events present, oldest first (tool, tool, ask).
+        let list_idx = out.find("list_boards").unwrap();
+        let create_idx = out.find("create_card").unwrap();
+        let ask_idx = out.find("asked").unwrap();
+        assert!(
+            list_idx < create_idx,
+            "tools should be in call order: {out}"
+        );
+        assert!(create_idx < ask_idx, "ask should follow its tools: {out}");
+    }
+
+    #[test]
+    fn recall_query_matching_nothing_returns_empty_sections() {
+        let d = tmp();
+        log_ask_to(d.path(), "create a card", "yes", 1, 1, 500, None);
+        let out = recall_from(d.path(), Some("xyzzy_nothing_matches"), 10);
+        assert!(
+            out.contains("No history yet") || !out.contains("create a card"),
+            "should not contain the unmatched event: {out}"
+        );
+    }
+
+    #[test]
+    fn multiple_lessons_recalled_most_recent_first() {
+        let d = tmp();
+        remember_to(d.path(), "first lesson").unwrap();
+        remember_to(d.path(), "second lesson").unwrap();
+        remember_to(d.path(), "third lesson").unwrap();
+
+        let out = recall_from(d.path(), Some("lesson"), 10);
+        let first_idx = out.find("first lesson").unwrap();
+        let second_idx = out.find("second lesson").unwrap();
+        let third_idx = out.find("third lesson").unwrap();
+        // grep_context returns newest first.
+        assert!(third_idx < second_idx, "newest first: {out}");
+        assert!(second_idx < first_idx, "newest first: {out}");
+    }
+
+    #[test]
+    fn recall_shows_notes_even_without_activity() {
+        // remember a lesson without ever logging an ask or tool call.
+        let d = tmp();
+        remember_to(
+            d.path(),
+            "MAG Solar has columns: In Progress, Blocked, Testing",
+        )
+        .unwrap();
+
+        let out = recall_from(d.path(), None, 10);
+        assert!(
+            out.contains("Memory notes"),
+            "notes section should appear: {out}"
+        );
+        assert!(
+            out.contains("MAG Solar has columns"),
+            "lesson content: {out}"
+        );
+    }
 }

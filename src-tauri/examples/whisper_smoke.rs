@@ -32,12 +32,12 @@ fn download_whisper_base(dir: &std::path::Path) -> Result<PathBuf, String> {
     }
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     println!("downloading ggml-base.bin (~141 MB)…");
-    let resp = ureq::get(WHISPER_BASE_URL)
+    let mut resp = ureq::get(WHISPER_BASE_URL)
         .call()
         .map_err(|e| format!("download: {e}"))?;
     let tmp = dir.join("models").join(".whisper-base.bin.part");
     let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    std::io::copy(&mut resp.into_reader(), &mut out).map_err(|e| e.to_string())?;
+    std::io::copy(&mut resp.body_mut().as_reader(), &mut out).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     println!("downloaded.");
     Ok(path)

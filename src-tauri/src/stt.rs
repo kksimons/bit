@@ -132,12 +132,12 @@ pub fn download_model<F: FnMut(usize, usize, &str)>(
             continue;
         }
         println!("[bit] downloading {name} …");
-        let resp = ureq::get(url)
+        let mut resp = ureq::get(*url)
             .call()
             .map_err(|e| format!("download {name}: {e}"))?;
         let tmp = dir.join(format!("{name}.part"));
         let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        std::io::copy(&mut resp.into_reader(), &mut out).map_err(|e| e.to_string())?;
+        std::io::copy(&mut resp.body_mut().as_reader(), &mut out).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
         println!("[bit] downloaded {name}");
         on_progress(i + 1, total, name);

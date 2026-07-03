@@ -314,20 +314,17 @@ fn ask_openai(
 /// the first, trimming the processing gap the user feels.
 fn http() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(|| ureq::AgentBuilder::new().build())
+    AGENT.get_or_init(ureq::agent)
 }
 
 fn post(url: &str, headers: &[(String, String)], body: Value) -> Result<Value, String> {
-    let mut req = http().post(url).set("content-type", "application/json");
+    let mut req = http().post(url).header("content-type", "application/json");
     for (k, v) in headers {
-        req = req.set(k.as_str(), v.as_str());
+        req = req.header(k.as_str(), v.as_str());
     }
-    match req.send_json(body) {
-        Ok(r) => r.into_json().map_err(|e| e.to_string()),
-        Err(ureq::Error::Status(code, r)) => Err(format!(
-            "HTTP {code}: {}",
-            r.into_string().unwrap_or_default()
-        )),
+    match req.send_json(&body) {
+        Ok(mut r) => r.body_mut().read_json::<Value>().map_err(|e| e.to_string()),
+        Err(ureq::Error::StatusCode(code)) => Err(format!("HTTP {code}")),
         Err(e) => Err(e.to_string()),
     }
 }
