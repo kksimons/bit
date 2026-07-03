@@ -1,15 +1,13 @@
 //! File-backed OAuth credential storage for HTTP MCP servers.
 //!
-//! rmcp's `AuthorizationManager` owns the entire OAuth 2.1 flow (discovery, DCR,
-//! PKCE, token exchange, refresh) but is agnostic to *where* tokens live — it
-//! takes a `CredentialStore` trait. We implement that trait with a `0600` JSON
-//! file per server, consistent with how the LLM API key is stored (`config.rs`)
-//! and what we agreed on: the same protection level, no Keychain, uniform model.
+//! rmcp's `AuthorizationManager` owns the OAuth 2.1 flow (discovery, DCR, PKCE,
+//! token exchange, refresh) but is agnostic to where tokens live — it takes a
+//! `CredentialStore` trait. We implement it with a `0600` JSON file per server,
+//! consistent with how the LLM API key is stored (`config.rs`).
 //!
-//! One real consideration OAuth introduces: the spec requires refresh-token
-//! rotation, so this file is rewritten on essentially every tool call. We write
-//! it atomically (temp file in the same dir, then rename) so a crash mid-rotate
-//! can never corrupt the token — a naive direct write could.
+//! OAuth spec requires refresh-token rotation, so this file is rewritten on
+//! essentially every tool call. We write it atomically (temp file + rename) so
+//! a crash mid-rotate can't corrupt the token.
 
 use std::path::{Path, PathBuf};
 
@@ -19,13 +17,10 @@ use serde_json::Value;
 use tauri::Manager;
 
 /// The fixed localhost port the OAuth loopback callback server listens on.
-/// DCR requires a stable, pre-registered redirect URI, so this is a constant
-/// (see lib.rs `OAUTH_CALLBACK_PORT`).
 pub const REDIRECT_URI: &str = "http://127.0.0.1:8473/callback";
 
 /// A `CredentialStore` backed by a `0600` JSON file at
-/// `<app_config>/mcp/<server>.token.json`. One instance per HTTP server, each
-/// scoped to its own path so servers never see each other's tokens.
+/// `<app_config>/mcp/<server>.token.json`.
 pub struct FileCredentialStore {
     path: PathBuf,
 }
@@ -62,10 +57,9 @@ pub fn path_for_dir(config_dir: &std::path::Path, server_name: &str) -> PathBuf 
         .join(format!("{}.token.json", sanitize_name(server_name)))
 }
 
-/// Atomic write: serialize to a temp file in the same directory, fsync, then
+/// Atomic write: serialize to a temp file in the same directory, set 0600, then
 /// rename over the target. Same-dir rename is atomic on Unix and avoids leaving
-/// a half-written token if the process dies mid-write — critical because OAuth
-/// refresh rewrites this file on every call.
+/// a half-written token if the process dies mid-write.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), rmcp::transport::auth::AuthError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let tmp = dir.join(format!(
@@ -94,8 +88,8 @@ impl CredentialStore for FileCredentialStore {
         let Some(bytes) = std::fs::read(&self.path).ok() else {
             return Ok(None);
         };
-        // StoredCredentials derives Deserialize, but rmcp's version may carry
-        // extra vendor token fields; deserialize leniently via serde_json.
+        // StoredCredentials derives Deserialize, but the rmcp version may carry
+        // extra vendor fields; deserialize leniently via serde_json.
         let v: Value = serde_json::from_slice(&bytes)
             .map_err(|e| rmcp::transport::auth::AuthError::InternalError(e.to_string()))?;
         let creds: StoredCredentials = serde_json::from_value(v)

@@ -33,7 +33,8 @@ fn dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().app_config_dir().ok()
 }
 
-/// ISO-8601 UTC timestamp without pulling in chrono, e.g. 2026-07-03T14:22:01Z.
+/// ISO-8601 UTC timestamp without a date crate, e.g. 2026-07-03T14:22:01Z.
+/// Uses Howard Hinnant's civil_from_days algorithm.
 fn now_iso() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -42,7 +43,6 @@ fn now_iso() -> String {
     let day = secs.div_euclid(86400);
     let sod = secs.rem_euclid(86400);
     let (h, m, s) = (sod / 3600, (sod % 3600) / 60, sod % 60);
-    // civil_from_days (Howard Hinnant's algorithm) — valid for all day >= 0.
     let z = day + 719468;
     let era = z.div_euclid(146097);
     let doe = z.rem_euclid(146097);
@@ -56,12 +56,12 @@ fn now_iso() -> String {
     format!("{year:04}-{month:02}-{d:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-/// Collapse whitespace + trim, so single-line log/markdown entries stay clean.
+/// Collapse whitespace + trim.
 fn scrub(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Truncate to ~n chars on a UTF-8 boundary, with an ellipsis. One pass.
+/// Truncate to ~n chars on a UTF-8 boundary, with an ellipsis.
 fn take(s: &str, n: usize) -> String {
     match s.char_indices().nth(n) {
         Some((i, _)) => format!("{}…", &s[..i]),
@@ -80,7 +80,7 @@ fn append_event(dir: &Path, event: Value) {
     }
 }
 
-/// Append a Markdown line to context.md (per-command summaries + lessons).
+/// Append a Markdown line to context.md.
 fn append_context_line(dir: &Path, line: &str) -> Result<(), String> {
     let mut f = OpenOptions::new()
         .create(true)
@@ -333,21 +333,18 @@ mod tests {
 
     #[test]
     fn take_truncates_on_char_boundary() {
-        // Short string unchanged.
         assert_eq!(take("abc", 10), "abc");
-        // ASCII cut.
         assert_eq!(take("abcdef", 3), "abc…");
         // Unicode cut does not panic and keeps whole chars.
         let cut = take("héllo🌍world", 6);
         assert!(cut.ends_with('…'));
-        assert!(cut.chars().count() <= 7); // 6 chars + ellipsis
-                                           // A char boundary: "héllo" is h,é,l,l,o (5 chars); cut at 5 keeps "héllo…"
+        assert!(cut.chars().count() <= 7);
         assert_eq!(take("héllo🌍", 5), "héllo…");
     }
 
     #[test]
     fn now_iso_is_well_formed() {
-        // Expected shape: YYYY-MM-DDTHH:MM:SSZ (20 chars), no chrono/regex dep.
+        // Expected shape: YYYY-MM-DDTHH:MM:SSZ (20 chars).
         let ts = now_iso();
         assert_eq!(ts.len(), 20, "ts: {ts}");
         let b = ts.as_bytes();
@@ -403,11 +400,9 @@ mod tests {
             4200,
             None,
         );
-        // activity.jsonl got an ask event...
         let activity = std::fs::read_to_string(activity_path(d.path())).unwrap();
         assert!(activity.contains("\"type\":\"ask\""));
         assert!(activity.contains("fix panel"));
-        // ...and context.md got a one-line summary.
         let ctx = std::fs::read_to_string(context_path(d.path())).unwrap();
         assert!(ctx.contains("create a card fix panel on MAG Solar"));
         assert!(ctx.contains("→ yes"));
@@ -415,7 +410,7 @@ mod tests {
 
     #[test]
     fn recall_resolves_it_after_create() {
-        // Simulate a spoken multi-command flow: create (ask + tool), then "move it".
+        // A spoken multi-command flow: create (ask + tool), then "move it".
         let d = tmp();
         log_tool_call_to(
             d.path(),
@@ -435,11 +430,11 @@ mod tests {
             None,
         );
 
-        // Next command: "move it to blocked" — the agent recalls to resolve "it".
+        // "move it to blocked" — the agent recalls to resolve "it".
         let recalled = recall_from(d.path(), Some("42"), 10);
         assert!(recalled.contains("42"), "should find card 42: {recalled}");
 
-        // Unfiltered recall returns the recent activity, oldest first.
+        // Unfiltered recall returns recent activity, oldest first.
         let recent = recall_from(d.path(), None, 10);
         let tool_idx = recent.find("tool").unwrap();
         let ask_idx = recent.find("asked").unwrap();
@@ -460,7 +455,6 @@ mod tests {
         let ctx = std::fs::read_to_string(context_path(d.path())).unwrap();
         assert!(ctx.contains("(lesson)"));
         assert!(ctx.contains("Blocked column"));
-        // recall surfaces lessons under "Memory notes".
         let out = recall_from(d.path(), Some("Blocked"), 10);
         assert!(out.contains("Memory notes"), "got: {out}");
         assert!(out.contains("Blocked column"));
@@ -508,7 +502,6 @@ mod tests {
 
     #[test]
     fn multiple_tool_calls_recalled_in_chronological_order() {
-        // A multi-step command: list_boards then create_card, then the ask verdict.
         let d = tmp();
         log_tool_call_to(
             d.path(),
@@ -537,7 +530,6 @@ mod tests {
         );
 
         let out = recall_from(d.path(), None, 10);
-        // All three events present, oldest first (tool, tool, ask).
         let list_idx = out.find("list_boards").unwrap();
         let create_idx = out.find("create_card").unwrap();
         let ask_idx = out.find("asked").unwrap();
@@ -570,14 +562,12 @@ mod tests {
         let first_idx = out.find("first lesson").unwrap();
         let second_idx = out.find("second lesson").unwrap();
         let third_idx = out.find("third lesson").unwrap();
-        // grep_context returns newest first.
         assert!(third_idx < second_idx, "newest first: {out}");
         assert!(second_idx < first_idx, "newest first: {out}");
     }
 
     #[test]
     fn recall_shows_notes_even_without_activity() {
-        // remember a lesson without ever logging an ask or tool call.
         let d = tmp();
         remember_to(
             d.path(),

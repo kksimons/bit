@@ -25,23 +25,6 @@ use std::path::PathBuf;
 
 use bit_lib::mcp;
 
-/// Derive a server name from its URL, mirroring the UI's `deriveName` exactly
-/// so this test exercises the same naming (and thus token-file path) the real
-/// app produces: notion, linear, sentry, …
-fn derive_name(url: &str) -> String {
-    let host = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-        .unwrap_or_default();
-    let stripped = host.strip_prefix("mcp.").unwrap_or(&host);
-    stripped
-        .split('.')
-        .next()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| "service".into())
-}
-
 /// The same config dir the real app uses on macOS, so this test reflects reality
 /// (a token saved here would be picked up by the running app, and vice versa).
 fn app_config_dir() -> PathBuf {
@@ -60,7 +43,7 @@ fn main() {
         .first()
         .cloned()
         .unwrap_or_else(|| "https://mcp.sentry.dev/mcp".to_string());
-    let name = derive_name(&url);
+    let name = mcp::derive_name(&url);
     let dir = app_config_dir();
 
     println!("\n=== MCP OAuth smoke test ===");

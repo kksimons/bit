@@ -3,16 +3,6 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 /// Non-secret settings, persisted as JSON in the app config dir.
-fn default_provider() -> String {
-    "zai".into()
-}
-
-/// Bit window size scale: 1.0 = the default 260px square. Slider range is
-/// 0.5–2.0, applied live by resizing the transparent overlay.
-fn default_size() -> f64 {
-    1.0
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     /// "zai" | "anthropic" (Anthropic Messages API) or "openai" | "openrouter"
@@ -21,18 +11,26 @@ pub struct Settings {
     pub provider: String,
     pub base_url: String,
     pub model: String,
-    /// When false (default), the model cannot run raw shell/AppleScript — only
-    /// your enabled workflows + safe built-ins. When true, raw execution tools
-    /// are re-enabled for power users who accept the risk.
+    /// When false (default), the model can't run raw shell/AppleScript — only
+    /// enabled workflows + safe built-ins. When true, raw execution tools are
+    /// re-enabled for power users who accept the risk.
     #[serde(default)]
     pub developer_mode: bool,
-    /// On-screen size multiplier for the Bit (0.5–2.0). Resizes the overlay.
+    /// On-screen size multiplier for the Bit (0.5–2.0).
     #[serde(default = "default_size")]
     pub size: f64,
     /// Which transcription model is active: "parakeet-v2" (default) or
-    /// "whisper-base". See `stt::MODELS`. Blank/unknown → default.
+    /// "whisper-base". See `stt::MODELS`.
     #[serde(default = "default_stt_model")]
     pub stt_model: String,
+}
+
+fn default_provider() -> String {
+    "zai".into()
+}
+
+fn default_size() -> f64 {
+    1.0
 }
 
 fn default_stt_model() -> String {
@@ -76,9 +74,9 @@ fn key_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     Some(app.path().app_config_dir().ok()?.join("api_key"))
 }
 
-/// API key stored in a 0600 file in the app's private config dir. (Dev builds
-/// get a fresh ad-hoc code signature each rebuild, which breaks Keychain ACLs
-/// and forced re-entry every launch; a file avoids that.)
+/// API key stored in a 0600 file. (Dev builds get a fresh ad-hoc code signature
+/// each rebuild, which breaks Keychain ACLs and forces re-entry every launch;
+/// a file avoids that.)
 pub fn get_key(app: &tauri::AppHandle) -> Option<String> {
     let s = std::fs::read_to_string(key_path(app)?).ok()?;
     let s = s.trim().to_string();

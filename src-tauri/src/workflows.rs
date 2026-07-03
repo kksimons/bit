@@ -50,7 +50,6 @@ pub struct GhosttyTab {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Workflow {
-    pub id: String,
     pub name: String,
     #[serde(default)]
     pub trigger_phrases: Vec<String>,
@@ -97,33 +96,15 @@ pub fn save_all(app: &tauri::AppHandle, all: &[Workflow]) -> Result<(), String> 
     std::fs::write(path, json).map_err(|e| e.to_string())
 }
 
-/// Generate a stable-ish id from the name plus a time suffix.
-fn new_id(name: &str) -> String {
-    let slug: String = name
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { '-' })
-        .collect();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{}-{}", slug.trim_matches('-'), nanos)
-}
-
 /// Create or update a workflow, matched by case-insensitive name.
-pub fn upsert(app: &tauri::AppHandle, mut wf: Workflow) -> Result<Workflow, String> {
+pub fn upsert(app: &tauri::AppHandle, wf: Workflow) -> Result<Workflow, String> {
     let mut all = load_all(app);
     if let Some(existing) = all
         .iter_mut()
         .find(|w| w.name.eq_ignore_ascii_case(&wf.name))
     {
-        wf.id = existing.id.clone();
         *existing = wf.clone();
     } else {
-        if wf.id.is_empty() {
-            wf.id = new_id(&wf.name);
-        }
         all.push(wf.clone());
     }
     save_all(app, &all)?;
@@ -133,7 +114,7 @@ pub fn upsert(app: &tauri::AppHandle, mut wf: Workflow) -> Result<Workflow, Stri
 pub fn delete(app: &tauri::AppHandle, name: &str) -> Result<(), String> {
     let mut all = load_all(app);
     let before = all.len();
-    all.retain(|w| !w.name.eq_ignore_ascii_case(name) && w.id != name);
+    all.retain(|w| !w.name.eq_ignore_ascii_case(name));
     if all.len() == before {
         return Err(format!("no workflow named '{name}'"));
     }

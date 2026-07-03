@@ -23,11 +23,10 @@ use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut,
 #[cfg(target_os = "macos")]
 use tauri::ActivationPolicy;
 
-/// Default square window size for the Bit, in logical pixels. The on-screen
-/// size multiplier resizes around this base.
+/// Base square window size for the Bit overlay, in logical pixels.
 const BIT_BASE_SIZE: f64 = 260.0;
 
-/// Toggle dictation: press once to start, again to stop (Ctrl+Opt+Space).
+/// Push-to-talk: press once to start, again to stop (Ctrl+Opt+Space).
 fn talk_shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::Space)
 }
@@ -35,12 +34,10 @@ fn talk_shortcut() -> Shortcut {
 struct AppState {
     recorder: audio::Recorder,
     stt: Arc<stt::Stt>,
-    /// Last time the talk shortcut toggled — time-debounces duplicate/auto-repeat
-    /// shortcut events (macOS can double-fire), so one press = one toggle.
+    /// Debounces duplicate/auto-repeat shortcut events (macOS can double-fire).
     last_toggle: Mutex<Instant>,
     /// Set while the user is dragging the Bit (pauses the click-through poller).
     dragging: Arc<AtomicBool>,
-    /// Live MCP server connections, keyed by server name.
     mcp: mcp::Registry,
 }
 
@@ -110,11 +107,9 @@ fn run_workflow(app: tauri::AppHandle, name: String) -> Result<String, String> {
 
 // ---- Bit size ----
 
-/// Resize the Bit overlay around its base size. `scale` is the user's size
-/// multiplier (clamped to the slider range). The passthrough poller reads the
-/// window size live, so the click-through hit disc follows automatically.
+/// Resize the overlay around the base size; the passthrough poller follows live.
 fn apply_bit_size(app: &tauri::AppHandle, scale: f64) {
-    let Some(win) = app.get_webview_window("bit") else {
+    let Some(win) = bit_window(app) else {
         return;
     };
     let px = BIT_BASE_SIZE * scale.clamp(0.5, 2.0);
@@ -143,7 +138,6 @@ fn set_dnd(enabled: bool) -> Result<String, String> {
     tools::set_focus(enabled)
 }
 
-/// Open the Shortcuts app so the user can create the two required Shortcuts.
 #[tauri::command]
 fn setup_dnd() -> Result<(), String> {
     std::process::Command::new("open")
@@ -156,8 +150,8 @@ fn setup_dnd() -> Result<(), String> {
 
 // ---- drag / fling physics ----
 
-/// Begin a custom drag: a background thread moves the Bit window to follow the
-/// cursor and tracks release velocity, so letting go can fling it with momentum.
+/// A background thread follows the cursor while dragging and tracks release
+/// velocity, so letting go can fling the Bit with momentum.
 #[tauri::command]
 fn start_drag(app: tauri::AppHandle) {
     let state = app.state::<AppState>();
@@ -165,7 +159,7 @@ fn start_drag(app: tauri::AppHandle) {
         return; // already dragging
     }
     let dragging = state.dragging.clone();
-    let Some(win) = app.get_webview_window("bit") else {
+    let Some(win) = bit_window(&app) else {
         return;
     };
     std::thread::spawn(move || {
@@ -183,7 +177,7 @@ fn start_drag(app: tauri::AppHandle) {
             let nx = (cur.x - off_x).round() as i32;
             let ny = (cur.y - off_y).round() as i32;
             let _ = win.set_position(tauri::PhysicalPosition::new(nx, ny));
-            // EMA of cursor velocity (tick ≈ 8ms)
+            // EMA of cursor velocity (tick ≈ 8ms).
             let vx = (cur.x - last.x) / 8.0;
             let vy = (cur.y - last.y) / 8.0;
             vel.0 = vel.0 * 0.6 + vx * 0.4;
@@ -204,7 +198,6 @@ fn end_drag(app: tauri::AppHandle) {
 
 // ---- MCP (external tool servers) ----
 
-/// All configured MCP servers + their live connection status, for the UI.
 #[derive(serde::Serialize)]
 struct McpServerView {
     name: String,
@@ -229,7 +222,7 @@ fn get_mcp_servers(app: tauri::AppHandle) -> Vec<McpServerView> {
             let connected = registry.is_connected(&s.name);
             McpServerView {
                 tool_count: if connected {
-                    registry.tool_count(&s)
+                    registry.tool_count(&s.name)
                 } else {
                     0
                 },
@@ -255,7 +248,6 @@ fn save_mcp_server(
 ) -> Result<mcp::McpServer, String> {
     app.state::<AppState>().mcp.invalidate(&server.name);
     let saved = mcp::upsert(&app, server)?;
-    // If enabled, start warming the (new) connection now.
     if saved.enabled {
         spawn_mcp_prewarm(app.clone());
     }
@@ -265,26 +257,23 @@ fn save_mcp_server(
 #[tauri::command]
 fn delete_mcp_server(app: tauri::AppHandle, name: String) -> Result<(), String> {
     app.state::<AppState>().mcp.invalidate(&name);
-    // Also remove any stored OAuth token for an http server so it’s fully gone.
+    // Drop any stored OAuth token for an http server so it's fully gone.
     if let Some(path) = mcp::oauth::FileCredentialStore::path_for(&app, &name) {
         let _ = std::fs::remove_file(path);
     }
     mcp::delete(&app, &name)
 }
 
-/// Add a remote (HTTP) MCP server via the OAuth flow: discover → register →
-/// open browser for sign-in → capture the loopback callback → persist token.
-/// On success the server is saved (enabled) and pre-warmed. The caller in the
-/// UI just supplies a name + URL — this is the one-line “Add a service” UX.
+/// Add a remote (HTTP) MCP server via OAuth: discover → register → browser
+/// sign-in → loopback callback → persist token. The UI just supplies name + URL.
 #[tauri::command]
 fn add_http_server(app: tauri::AppHandle, name: String, url: String) -> Result<String, String> {
-    // Run OAuth first; if the user bails or it fails, we save nothing.
     let dir = app
         .path()
         .app_config_dir()
         .map_err(|e| format!("no config dir: {e}"))?;
     // run_oauth_flow normalizes the URL (e.g. /sse → /mcp) and returns the one
-    // it actually used; save THAT so the token's audience matches connect.
+    // it used; save THAT so the token's audience matches connect.
     let resolved_url = mcp::http::run_oauth_flow(&dir, &name, &url)?;
     let server = mcp::McpServer {
         name,
@@ -302,8 +291,6 @@ fn add_http_server(app: tauri::AppHandle, name: String, url: String) -> Result<S
     Ok(resolved_url)
 }
 
-/// Probe one server: connect now, run tools/list, and report status. Lets the
-/// UI show “connected · N tools” on demand (and after the user pastes a token).
 #[tauri::command]
 fn test_mcp_server(app: tauri::AppHandle, name: String) -> Result<usize, String> {
     let server = mcp::load_all(&app)
@@ -313,7 +300,6 @@ fn test_mcp_server(app: tauri::AppHandle, name: String) -> Result<usize, String>
     if !server.enabled {
         return Err("server is disabled".into());
     }
-    // Force a fresh connect attempt (drops any cached error).
     app.state::<AppState>().mcp.invalidate(&name);
     app.state::<AppState>()
         .mcp
@@ -321,17 +307,13 @@ fn test_mcp_server(app: tauri::AppHandle, name: String) -> Result<usize, String>
         .map(|t| t.len())
 }
 
-/// List one server's tools with their enabled + destructive state, for the
-/// “Manage tools” UI. Connects if needed.
 #[tauri::command]
 fn get_mcp_tools(app: tauri::AppHandle, name: String) -> Result<Vec<mcp::ToolView>, String> {
     mcp::tools_view(&app, &name)
 }
 
-/// Toggle a single tool on/off, OR bulk-replace the whole denylist. `disabled`
-/// is the FULL new denylist (server-side tool names) — the UI computes it
-/// locally and sends the complete set, which keeps this command simple and
-/// idempotent. Cheap: rewrites `mcp.json` only, no reconnect.
+/// `disabled` is the FULL new denylist (server-side tool names). The UI sends
+/// the complete set, keeping this idempotent. Cheap: rewrites `mcp.json` only.
 #[tauri::command]
 fn set_mcp_disabled_tools(
     app: tauri::AppHandle,
@@ -343,7 +325,6 @@ fn set_mcp_disabled_tools(
 
 // ---- Transcription models ----
 
-/// A model's UI-facing metadata + on-disk state.
 #[derive(serde::Serialize)]
 struct ModelView {
     id: String,
@@ -373,9 +354,7 @@ fn get_stt_models(app: tauri::AppHandle) -> Vec<ModelView> {
         .collect()
 }
 
-/// Download a model's files. Emits `stt-download-progress` events as each
-/// file completes so the UI can show a progress bar. Runs synchronously — the
-/// UI calls this from a background task and awaits completion.
+/// Download a model's files, emitting `stt-download-progress` per file.
 #[tauri::command]
 fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
@@ -393,11 +372,9 @@ fn download_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), Str
     Ok(())
 }
 
-/// Set the active transcription model. Takes effect on the next recording —
-/// `Stt::ensure_loaded` reloads when the id changes.
+/// Set the active transcription model; takes effect on the next recording.
 #[tauri::command]
 fn set_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
-    // Validate the id is a known model so a bad UI call can't break STT.
     if !stt::MODELS.iter().any(|m| m.id == model_id) {
         return Err(format!("unknown model: {model_id}"));
     }
@@ -406,19 +383,16 @@ fn set_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> 
     config::save_settings(&app, &s)
 }
 
-/// Remove a downloaded model from disk (the user picked a different one and
-/// wants the space back). Refuses if it's the active model.
 #[tauri::command]
 fn delete_stt_model(app: tauri::AppHandle, model_id: String) -> Result<(), String> {
     let active = config::load_settings(&app).stt_model;
     if active == model_id {
-        return Err("can’t delete the active model — switch first".into());
+        return Err("can't delete the active model — switch first".into());
     }
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     stt::delete_model(&app_data, &model_id)
 }
 
-/// One credential field a preset asks the UI to collect.
 #[derive(serde::Serialize)]
 struct PresetFieldView {
     env_key: String,
@@ -427,7 +401,6 @@ struct PresetFieldView {
     secret: bool,
 }
 
-/// Gallery presets the UI renders as one-click “Add X” buttons.
 #[derive(serde::Serialize)]
 struct PresetView {
     id: String,
@@ -462,9 +435,7 @@ fn get_mcp_presets() -> Vec<PresetView> {
         .collect()
 }
 
-/// Background-warm every enabled MCP server. Safe to call repeatedly; already-
-/// connected servers are no-ops. Runs off the calling thread so it never blocks
-/// the UI or the agent loop.
+/// Background-warm every enabled MCP server (already-connected ones are no-ops).
 fn spawn_mcp_prewarm(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let registry = app.state::<AppState>().mcp.clone();
@@ -479,11 +450,8 @@ fn spawn_mcp_prewarm(app: tauri::AppHandle) {
     });
 }
 
-/// Pre-load the speech-to-text model in the background right after launch, so
-/// the first voice command doesn't pay the model-load cost (which otherwise
-/// lands on the critical path between stop-listening and the verdict). Cheap:
-/// the model is resident anyway after first use; this just front-loads it.
-/// Failures are non-fatal — `ensure_loaded` is retried on the next command.
+/// Pre-load the STT model after launch so the first voice command doesn't pay
+/// the load cost. Failures are non-fatal (retried on first use).
 fn spawn_stt_prewarm(app: tauri::AppHandle) {
     std::thread::spawn(move || {
         let stt = app.state::<AppState>().stt.clone();
@@ -496,29 +464,22 @@ fn spawn_stt_prewarm(app: tauri::AppHandle) {
 
 // ---- Launch on startup ----
 //
-// We wrap the autostart plugin in our own commands rather than letting the
-// frontend call it directly, so we can refuse in development builds. Registering
-// a login item that points at `target/debug/bit` is a footgun: that binary loads
-// its UI from the Vite dev server, which isn't running after a reboot — so the
-// app starts to a blank screen. Force users onto a real `tauri build` install.
+// Wrapped in our own commands so we can refuse in dev builds: the debug binary
+// loads its UI from the Vite dev server, which isn't running after a reboot.
 
-/// Read whether launch-on-login is currently registered with the OS.
 #[tauri::command]
 fn autostart_state(app: tauri::AppHandle) -> bool {
-    // Reading is always safe — it just inspects the existing login item.
     app.autolaunch().is_enabled().unwrap_or(false)
 }
 
-/// Register or unregister Bit as a login item. Refuses in debug builds.
+/// Register/unregister Bit as a login item. Refuses in debug builds (see above).
 #[tauri::command]
 fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
-    // `cfg!(debug_assertions)` is a const bool: true under `tauri dev` (debug
-    // profile), false under `tauri build` (release). It compiles out cleanly and
-    // is far more reliable than sniffing current_exe().
+    // cfg!(debug_assertions) is true under `tauri dev`, false under `tauri build`.
     if cfg!(debug_assertions) {
         return Err(
             "Launch on startup is disabled in development builds — the dev binary \
-             can’t find its UI after a reboot. Build and install the app first: \
+             can't find its UI after a reboot. Build and install the app first: \
              `bun run tauri build`, then open the resulting .app and re-enable this."
                 .into(),
         );
@@ -531,16 +492,29 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     }
 }
 
-/// Maximum chars of tool output we keep (in memory + shown to the model).
+/// Max chars of tool output kept (in memory + shown to the model).
 pub(crate) const MAX_OUTPUT: usize = 4000;
 
-/// The bit overlay window, if it exists yet. Centralizes the lookup the emit
-/// helpers and drag handlers all need, and makes "no window yet" one guard.
+/// Truncate `s` to [`MAX_OUTPUT`] bytes on a UTF-8 char boundary, with ellipsis.
+pub(crate) fn truncate_output(s: &mut String) {
+    if s.len() <= MAX_OUTPUT {
+        return;
+    }
+    let cut = s
+        .char_indices()
+        .take_while(|(i, _)| *i <= MAX_OUTPUT)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(MAX_OUTPUT);
+    s.truncate(cut);
+    s.push_str("\n…[truncated]");
+}
+
+/// The Bit overlay window, if it exists.
 fn bit_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
     app.get_webview_window("bit")
 }
 
-/// Tell the Bit overlay to change form/state.
 fn set_bit_state(app: &tauri::AppHandle, state: &str) {
     if let Some(win) = bit_window(app) {
         let _ = win.emit("bit-state", state);
@@ -557,17 +531,14 @@ fn emit_verdict(app: &tauri::AppHandle, yes: bool, times: u8) {
     }
 }
 
-/// A heartbeat while the agent works: each LLM turn and each tool call nudges
-/// this so the Bit's "thinking" animation can advance (e.g. alternate its sway
-/// axis). Without it the Bit is motionless for the whole processing gap.
+/// Heartbeat while the agent works (one per LLM turn + tool call) so the Bit's
+/// thinking animation can advance instead of freezing through the latency.
 pub fn nudge_thinking(app: &tauri::AppHandle) {
     if let Some(win) = bit_window(app) {
         let _ = win.emit("bit-step", ());
     }
 }
 
-/// Reveal the memory files (activity.jsonl + context.md) in Finder, so the user
-/// can read, grep, or hand-edit Bit's history/notes.
 #[tauri::command]
 fn open_memory_folder(app: tauri::AppHandle) -> Result<(), String> {
     let dir = memory::folder(&app)?;
@@ -578,9 +549,8 @@ fn open_memory_folder(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// Open (or focus) the settings window. On macOS we temporarily switch to a
-/// regular activation policy so the window can take focus, then drop back to
-/// accessory (no Dock icon) when it closes.
+/// Open (or focus) the settings window. Briefly switches to a regular activation
+/// policy so the window can take focus, then drops back to accessory on close.
 fn open_settings(app: &tauri::AppHandle) {
     if let Some(win) = app.get_webview_window("config") {
         let _ = win.show();
@@ -588,9 +558,8 @@ fn open_settings(app: &tauri::AppHandle) {
         return;
     }
 
-    // Become a regular app so the new window can take focus, then build and
-    // explicitly focus it — otherwise (from accessory mode) it opens behind and
-    // needs a second click to come forward.
+    // Become a regular app so the window can take focus (in accessory mode it
+    // would open behind and need a second click).
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(ActivationPolicy::Regular);
 
@@ -609,10 +578,9 @@ fn open_settings(app: &tauri::AppHandle) {
     }
 }
 
-/// Background poll: keep the overlay click-through everywhere except over the
-/// Bit itself, so empty pixels pass clicks to whatever is behind it. We poll the
-/// global cursor against the window's center so it works even while the window is
-/// ignoring cursor events (and thus receiving no DOM mouse events).
+/// Keep the overlay click-through except over the Bit itself, so empty pixels
+/// pass clicks through. Polls the global cursor vs. the window center because
+/// the window receives no DOM mouse events while ignoring cursor events.
 fn spawn_passthrough(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
@@ -622,8 +590,7 @@ fn spawn_passthrough(
         let mut last: Option<bool> = None;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(70));
-            // While dragging/flinging, leave the window interactive and let the
-            // motion code own positioning.
+            // While dragging/flinging, leave the window interactive.
             if dragging.load(Ordering::Relaxed) {
                 if last != Some(true) {
                     let _ = window.set_ignore_cursor_events(false);
@@ -643,7 +610,7 @@ fn spawn_passthrough(
             let cy = pos.y as f64 + size.height as f64 / 2.0;
             let dx = cursor.x - cx;
             let dy = cursor.y - cy;
-            // interactive within a centered disc covering the Bit (+ margin)
+            // Interactive within a centered disc covering the Bit.
             let r = size.width.min(size.height) as f64 * 0.5 * 0.8;
             let over = dx * dx + dy * dy <= r * r;
             if last != Some(over) {
@@ -659,26 +626,18 @@ fn spawn_passthrough(
 fn on_toggle(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     if !state.recorder.is_recording() {
-        // Refuse visibly if the mic never came up (no permission / no device).
-        // Previously this silently started a recording that captured nothing,
-        // then hung in "thinking" for ~30s — exactly the stuck-on-thinking bug.
+        // Refuse visibly if the mic never came up.
         if !state.recorder.available() {
             let reason = state
                 .recorder
                 .last_error()
                 .unwrap_or_else(|| "microphone unavailable".into());
             eprintln!("[bit] push-to-talk refused: {reason}");
-            // Flash “no” once so the user sees the press registered but failed,
-            // rather than wondering if the shortcut is dead.
             emit_verdict(app, false, 1);
             return;
         }
-        // First-run guard: if the user hasn't downloaded any transcription
-        // model yet, don't silently start a 700 MB download mid-recording
-        // (the old behavior, which looked like a hang). Open Settings to the
-        // Transcription section so they can pick one. We can't deep-link to a
-        // section, so we just open the window — the empty state there explains
-        // what's needed.
+        // If no transcription model is downloaded yet, open Settings so the user
+        // can pick one rather than silently starting a 700 MB download mid-recording.
         let app_data = app.path().app_data_dir().unwrap_or_default();
         let active = config::load_settings(app).stt_model;
         if !stt::model_ready(&app_data, &active) {
@@ -696,8 +655,7 @@ fn on_toggle(app: &tauri::AppHandle) {
 }
 
 /// Auto-end listening when the user stops talking: once speech is detected, a
-/// ~1.1s lull (or a 30s cap) finishes the recording. So one press is enough —
-/// no second press needed.
+/// ~1.1s lull (or a 30s cap) finishes the recording — one press is enough.
 fn spawn_silence_watcher(app: tauri::AppHandle) {
     let recorder = app.state::<AppState>().recorder.clone();
     std::thread::spawn(move || {
@@ -741,36 +699,29 @@ fn finish_recording(app: &tauri::AppHandle) {
     let stt = app.state::<AppState>().stt.clone();
     let app = app.clone();
     std::thread::spawn(move || {
-        println!("[bit] worker: resampling + loading STT model…");
         let samples_16k = audio::resample_to_16k(&samples, rate);
         let active_model = config::load_settings(&app).stt_model;
-        let text = match stt.ensure_loaded(&active_model).and_then(|()| {
-            println!("[bit] worker: STT model loaded, transcribing…");
-            stt.transcribe(&samples_16k)
-        }) {
+        let text = match stt
+            .ensure_loaded(&active_model)
+            .and_then(|()| stt.transcribe(&samples_16k))
+        {
             Ok(t) => t.trim().to_string(),
             Err(e) => {
                 eprintln!("[bit] stt error: {e}");
                 String::new()
             }
         };
-        println!("[bit] heard: {text:?}");
         let _ = app.emit("transcript", text.clone());
         if text.is_empty() {
-            println!("[bit] worker: empty transcript → neutral");
             set_bit_state(&app, "neutral");
             return;
         }
         match config::load_agent_config(&app) {
             None => {
-                eprintln!("[bit] no Z.AI key set — open Settings to add it");
+                eprintln!("[bit] no API key set — open Settings to add it");
                 set_bit_state(&app, "neutral");
             }
             Some(cfg) => {
-                println!(
-                    "[bit] worker: calling agent (provider={}, model={})…",
-                    cfg.provider, cfg.model
-                );
                 let ask_t0 = Instant::now();
                 match agent::ask(&app, &cfg, &text) {
                     Ok((yes, times, n_tools)) => {
@@ -813,8 +764,7 @@ pub fn run() {
                     if shortcut != &talk_shortcut() {
                         return;
                     }
-                    // Act on key-down only, time-debounced so one press = one
-                    // toggle even if macOS repeats the event while held.
+                    // Act on key-down only, time-debounced against auto-repeat.
                     if event.state() != ShortcutState::Pressed {
                         return;
                     }
@@ -834,18 +784,13 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(ActivationPolicy::Accessory);
 
-            // Speech-to-text state. The model dir is decided per-active-model
-            // (see stt::model_dir); Stt just needs the app-data root. Migrate
-            // any pre-0.2.0 model dir name first so existing users keep working.
             let app_data = app.path().app_data_dir()?;
-            stt::migrate_legacy_dirs(&app_data);
             let stt = Arc::new(stt::Stt::new(app_data));
             let dragging = Arc::new(AtomicBool::new(false));
-            // The MCP registry is registered TWICE: nested in AppState (for the
-            // commands that reach via `app.state::<AppState>().mcp`) AND as a
-            // top-level managed type (so `app.state::<Registry>()` works from
-            // mcp.rs/agent.rs, which can't name AppState). Both point at the
-            // SAME Arc-backed instance, so this is free and never diverges.
+            // The MCP registry is registered twice: nested in AppState (for the
+            // commands) and as a top-level managed type (so mcp.rs/agent.rs can
+            // reach it via app.state::<Registry>()). Both point at the same
+            // Arc-backed instance.
             let mcp = mcp::Registry::new();
             app.manage(mcp.clone());
             app.manage(AppState {
@@ -856,29 +801,13 @@ pub fn run() {
                 mcp,
             });
 
-            // Pre-warm enabled MCP servers in the background so the first voice
-            // request doesn't stall on npx cold-start. Failures are non-fatal —
-            // the server just contributes no tools until it connects.
             spawn_mcp_prewarm(app.handle().clone());
-
-            // Pre-load the STT model in the background so the first voice command
-            // doesn't pay the model-load cost on the critical path. Same idea.
             spawn_stt_prewarm(app.handle().clone());
 
-            // Defense-in-depth: verify the Registry is reachable via the
-            // standalone `app.state::<Registry>()` path that mcp.rs/agent.rs
-            // use. If a future refactor un-manges it, this panics loudly at
-            // startup instead of silently breaking push-to-talk mid-request
-            // (which is the exact bug this guards against).
-            let _: tauri::State<'_, mcp::Registry> = app.state::<mcp::Registry>();
-            eprintln!("[bit] setup ok: MCP registry registered");
-
-            // Push-to-talk global shortcut.
             app.global_shortcut().register(talk_shortcut())?;
 
-            // Tray icon is the only chrome: open settings / quit. Use a dedicated
-            // monochrome template image (adaptive to the menu bar) built from the
-            // Bit geometry; fall back to the app icon if it can't be decoded.
+            // Tray icon is the only chrome. Prefer a monochrome template image
+            // (adaptive to the menu bar); fall back to the colored app icon.
             let tray_icon =
                 tauri::image::Image::from_bytes(include_bytes!("../icons/bit-tray.png"))
                     .map_err(|e| eprintln!("[bit] tray icon decode failed: {e}"))
@@ -897,7 +826,6 @@ pub fn run() {
                     "quit" => app.exit(0),
                     _ => {}
                 });
-            // Prefer the template silhouette; otherwise the colored app icon.
             if let Some(icon) = tray_icon {
                 tray = tray.icon(icon);
             } else if let Some(icon) = app.default_window_icon().cloned() {
@@ -905,8 +833,7 @@ pub fn run() {
             }
             tray.build(app)?;
 
-            if let Some(win) = app.get_webview_window("bit") {
-                // Apply the saved on-screen size before the passthrough poller starts.
+            if let Some(win) = bit_window(app.handle()) {
                 apply_bit_size(app.handle(), config::load_settings(app.handle()).size);
                 spawn_passthrough(app.handle().clone(), win, dragging.clone());
             }

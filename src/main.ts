@@ -17,17 +17,10 @@ void listen<{ kind: "yes" | "no"; times: number }>("bit-verdict", (e) => {
   bit.react(e.payload.kind, e.payload.times);
 });
 
-// Heartbeat while the agent works (each LLM turn + tool call). The Bit
-// alternates its thinking sway axis on each nudge so it reads as "busy".
+// Heartbeat while the agent works (each LLM turn + tool call).
 void listen("bit-step", () => bit.thinkingStep());
 
-// Backend reports what it transcribed (no agent yet — just surface it).
-void listen<string>("transcript", (e) => {
-  if (e.payload) console.log("[bit] heard:", e.payload);
-});
-
-// Custom drag with fling physics: the Rust side follows the cursor while
-// dragging, tracks release velocity, and throws the Bit with momentum on let-go.
+// Drag with fling physics is handled on the Rust side.
 let dragging = false;
 canvas.addEventListener("pointerdown", (e) => {
   if (e.button !== 0) return;
@@ -52,12 +45,11 @@ const endDrag = (e: PointerEvent) => {
 canvas.addEventListener("pointerup", endDrag);
 canvas.addEventListener("pointercancel", endDrag);
 
-// Dev harness: exercise states from the keyboard until the agent drives them.
+// Dev harness: exercise states from the keyboard. Shift+y/n triggers an emphatic
+// triple for testing the personality bounce without an LLM round-trip.
 window.addEventListener("keydown", (e) => {
   switch (e.key.toLowerCase()) {
     case "y":
-      // Shift+Y = emphatic triple (“yes yes yes” / “no no no”) for testing the
-      // personality bounce at max enthusiasm without an LLM round-trip.
       if (e.shiftKey) bit.react("yes", 3);
       else bit.setState("yes");
       break;

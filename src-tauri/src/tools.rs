@@ -3,9 +3,9 @@ use serde_json::{json, Value};
 use std::process::Command;
 use tauri::Manager;
 
-/// Tools the model may call. By default the model gets only SAFE, bounded tools
-/// (run your enabled workflows + open apps/URLs + Focus + move). Raw execution
-/// (shell, AppleScript, ad-hoc terminal tabs) is added only in Developer mode.
+/// Tools the model may call. By default only safe, bounded tools (enabled
+/// workflows + open apps/URLs + Focus + move). Raw execution (shell,
+/// AppleScript, ad-hoc terminal tabs) is added only in Developer mode.
 pub fn definitions(developer_mode: bool) -> Value {
     let mut tools = vec![
         json!({
@@ -112,7 +112,6 @@ pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<Stri
 
     let arg = |key: &str| input.get(key).and_then(|v| v.as_str()).map(str::to_owned);
 
-    // Raw-execution tools are only available in Developer mode.
     if matches!(name, "run_shell" | "run_applescript" | "open_terminal_tabs")
         && !crate::config::load_settings(app).developer_mode
     {
@@ -167,12 +166,11 @@ pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<Stri
                 .get("trigger_phrases")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
                 .unwrap_or_default();
+            // Model-authored workflows are saved disabled — the user must enable
+            // them in Settings before they can run.
             let wf = Workflow {
-                id: String::new(),
                 name: name.clone(),
                 trigger_phrases,
-                // Model-authored workflows are saved DISABLED — the user must
-                // review and enable them in Settings before they can run.
                 enabled: false,
                 steps,
             };
@@ -206,9 +204,9 @@ pub fn run_shell(command: &str) -> Result<String, String> {
     capture(Command::new("zsh").arg("-lc").arg(command))
 }
 
-/// Hard backstop denylist for the genuinely catastrophic — applies even to your
-/// own workflows and Developer mode. Conservative: targets irreversible/system
-/// damage, not ordinary `rm -rf ./node_modules`.
+/// Hard backstop for the genuinely catastrophic (irreversible/system damage) —
+/// applies even to your own workflows and Developer mode. Conservative: targets
+/// real damage, not ordinary `rm -rf ./node_modules`.
 const CATASTROPHIC: [(&str, &str); 12] = [
     ("rm -rf /", "rm -rf / (root)"),
     ("rm -rf /*", "rm -rf /*"),
@@ -225,7 +223,7 @@ const CATASTROPHIC: [(&str, &str); 12] = [
 ];
 
 fn is_catastrophic(cmd: &str) -> Option<&'static str> {
-    let c = cmd.to_lowercase().replace(['"', '\''], ""); // ignore quoting around targets
+    let c = cmd.to_lowercase().replace(['"', '\''], "");
     CATASTROPHIC
         .iter()
         .find(|(p, _)| c.contains(p))
@@ -261,6 +259,8 @@ pub fn set_focus(enabled: bool) -> Result<String, String> {
     capture(Command::new("shortcuts").arg("run").arg(shortcut))
 }
 
+/// Run a command, capturing stdout+stderr, and capping output to MAX_OUTPUT.
+/// Failures (non-zero exit) are returned as Err so the agent answers honestly.
 fn capture(cmd: &mut Command) -> Result<String, String> {
     let output = cmd.output().map_err(|e| e.to_string())?;
     let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -274,20 +274,9 @@ fn capture(cmd: &mut Command) -> Result<String, String> {
             "\n[exit code: {}]",
             output.status.code().unwrap_or(-1)
         ));
-        // Surface failures as errors so the agent answers honestly.
         return Err(s);
     }
-    if s.len() > crate::MAX_OUTPUT {
-        // Truncate on a UTF-8 char boundary (plain `truncate` panics mid-char).
-        let cut = s
-            .char_indices()
-            .take_while(|(i, _)| *i <= crate::MAX_OUTPUT)
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(crate::MAX_OUTPUT);
-        s.truncate(cut);
-        s.push_str("\n…[truncated]");
-    }
+    crate::truncate_output(&mut s);
     if s.trim().is_empty() {
         s = "(no output; succeeded)".into();
     }

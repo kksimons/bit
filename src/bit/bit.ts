@@ -9,25 +9,21 @@ const ROTATION_SPEED: Record<BitState, number> = {
   no: 0.016,
 };
 
-// Duration of a form change, and how far the Bit contracts at the midpoint.
 const TRANSITION_S = 0.3;
 const MIN_SCALE = 0.22;
 
-// --- personality bounce ---
-// On yes/no, the Bit bobs in the direction of its answer: UP for yes, DOWN
-// for no. Bigger answers (“yes yes yes”, times=3) bounce higher and quicker,
-// so emphasis is felt as well as heard. The bounce is an ease-out envelope
-// layered ON TOP of the resting hover-bob, so it composes with the form-change
-// and spin instead of fighting them.
+// Personality bounce: on yes/no the Bit bobs UP (yes) or DOWN (no). Bigger
+// answers (times=3) bounce higher and quicker. Layered on top of the resting
+// hover-bob so it composes with the form-change and spin.
 const BOUNCE_DURATION_S = 0.6;
 const BOUNCE_AMPLITUDE = 0.28; // world-space y units at times=1
 
 interface Bounce {
   active: boolean;
-  t: number; // seconds since the bounce started
+  t: number;
   direction: 1 | -1; // +1 = yes (up), -1 = no (down)
-  amplitude: number; // scaled by enthusiasm (times)
-  speed: number; // cadence multiplier (more reps = snappier)
+  amplitude: number;
+  speed: number;
 }
 
 interface Transition {
@@ -57,7 +53,6 @@ export class Bit {
     to: "neutral",
     swapped: true,
   };
-  /// Personality bounce (yes up / no down). Driven by `react`'s `times`.
   private bounce: Bounce = {
     active: false,
     t: 0,
@@ -65,9 +60,8 @@ export class Bit {
     amplitude: 0,
     speed: 1,
   };
-  /// Thinking sway: while processing, the Bit gently drifts, alternating the
-  /// drift axis (x side-to-side ↔ y up-and-down) on each backend "step" nudge,
-  /// so the user can see it's working through the latency instead of freezing.
+  // Thinking sway: while processing, the Bit drifts, alternating the axis
+  // (x side-to-side ↔ y up-and-down) on each backend "step" nudge.
   private thinkAxis: 0 | 1 = 0;
   private thinkStepAt = 0;
   private sounds: Record<"yes" | "no", HTMLAudioElement> = {
@@ -120,9 +114,6 @@ export class Bit {
       this.revertTimer = null;
     }
     this.transition = { active: true, t: 0, to: state, swapped: false };
-    // Each yes/no form-snap kicks a bounce in the answer’s direction. Amplitude
-    // and cadence scale with the last `react(times)` call, so “yes yes yes”
-    // bounces bigger and snappier than a single yes.
     if (state === "yes" || state === "no") {
       this.startBounce(state);
     }
@@ -131,11 +122,8 @@ export class Bit {
     }
   }
 
-  /// Arm a personality bounce for a yes/no snap. Enthusiasm is remembered so
-  /// each repeated snap in a `react` burst carries the same intensity.
   private enthusiasm = 1; // 1..3, set by react()
   private startBounce(kind: "yes" | "no") {
-    // 1..3 → amplitude/speed multipliers. times=3 is markedly bigger + snappier.
     const e = this.enthusiasm;
     this.bounce = {
       active: true,
@@ -149,7 +137,7 @@ export class Bit {
   /** Say yes/no `times` (1–3) in quick succession — Bit's bit of personality. */
   react(kind: "yes" | "no", times: number) {
     const n = Math.max(1, Math.min(3, Math.round(times)));
-    this.enthusiasm = n; // drives bounce amplitude/cadence for the whole burst
+    this.enthusiasm = n;
     const interval = 430;
     for (let i = 0; i < n; i++) {
       const last = i === n - 1;
@@ -157,12 +145,8 @@ export class Bit {
     }
   }
 
-  /**
-   * A backend heartbeat (one per LLM turn / tool call) while the agent works.
-   * Each call flips the thinking-sway axis (x ↔ y) and re-phases it, so the
-   * motion visibly changes direction as work progresses — a gentle "looking
-   * around while thinking" instead of a frozen glow.
-   */
+  /** Flip the thinking-sway axis (x ↔ y) and re-phase it, so motion visibly
+   * changes direction as work progresses. */
   thinkingStep() {
     this.thinkAxis = this.thinkAxis === 0 ? 1 : 0;
     this.thinkStepAt = this.clock.elapsedTime;
@@ -180,7 +164,7 @@ export class Bit {
     const a = this.sounds[state];
     a.currentTime = 0;
     void a.play().catch(() => {
-      /* autoplay may be blocked before first user gesture; ignore */
+      /* autoplay may be blocked before first user gesture */
     });
   }
 
@@ -190,11 +174,8 @@ export class Bit {
     this.material.emissive.setHex(p.emissive);
   }
 
-  /// Advance the personality bounce by `dt` and return its current y offset.
-  /// Shape: a single symmetric sin hop in the answer’s direction — it peaks
-  /// at the midpoint (p=0.5) and returns to 0 at both ends (start and settle),
-  /// reading as a lively “yes!” or a deflated “no”. Returns 0 when no bounce
-  /// is active.
+  /// Advance the bounce by `dt`, returning its current y offset. A single
+  /// symmetric sin hop — peaks at the midpoint, returns to 0 at both ends.
   private bounceOffset(dt: number): number {
     if (!this.bounce.active) return 0;
     this.bounce.t += dt * this.bounce.speed;
@@ -203,8 +184,6 @@ export class Bit {
       this.bounce.active = false;
       return 0;
     }
-    // sin(πp): a single symmetric hop — peak at the midpoint (p=0.5), back to
-    // 0 at p=0 and p=1.
     const hop = Math.sin(p * Math.PI);
     return this.bounce.direction * this.bounce.amplitude * hop;
   }
@@ -225,18 +204,13 @@ export class Bit {
     const speed = ROTATION_SPEED[this.state];
     this.mesh.rotation.y += speed;
     this.mesh.rotation.x += speed * 0.4;
-    // Personality rotation deltas (compose with the base spin):
-    //  - no: a gentle side-to-side head-shake (the universal “no” gesture).
-    //  - yes/no base spin already differs per state (see ROTATION_SPEED), so
-    //    yes reads as eager and no as slower/heavier on its own.
+    // no: a gentle side-to-side head-shake (the universal "no" gesture).
     if (this.state === "no") {
       this.mesh.rotation.z = Math.sin(t * 14) * 0.09;
     } else {
-      // ease z back to 0 so the wobble doesn't linger after a no.
-      this.mesh.rotation.z *= 0.85;
+      this.mesh.rotation.z *= 0.85; // ease z back to 0 after a no
     }
-    // Resting hover-bob is the base; the personality bounce and the thinking
-    // sway add on top of it (so yes bobs up from the hover, no dips below it).
+    // Resting hover-bob is the base; the bounce and thinking sway add on top.
     let swayY = 0;
     if (this.state === "thinking") {
       const since = t - this.thinkStepAt;
@@ -262,9 +236,8 @@ export class Bit {
       this.material.emissiveIntensity = 0.85;
       if (p >= 1) this.transition.active = false;
     } else if (this.state === "listening") {
-      // unmistakable: a strong, fast "breathing" pulse + glow throb so it's
-      // obvious the Bit is actively listening after a single press.
-      const pulse = (Math.sin(t * 7) + 1) / 2; // 0..1
+      // strong "breathing" pulse + glow throb so it's obviously listening.
+      const pulse = (Math.sin(t * 7) + 1) / 2;
       scale = 1.06 + pulse * 0.14;
       this.material.emissiveIntensity = 0.6 + pulse * 1.1;
     } else if (this.state === "thinking") {
@@ -272,10 +245,8 @@ export class Bit {
       scale = 1;
       this.material.emissiveIntensity = 0.7 + pulse * 0.7;
     } else {
-      // gentle slow "breathing" at rest (smooth, not jittery)
       scale = this.state === "neutral" ? 1 + Math.sin(t * 1.2) * 0.02 : 1;
-      // yes: enthusiasm glow — brighter when said more emphatically (times 1..3).
-      // no: dimmer, deflated. Both ease back toward neutral over the revert.
+      // yes: brighter when said more emphatically; no: dimmer/deflated.
       if (this.state === "yes") {
         this.material.emissiveIntensity = 0.85 + (this.enthusiasm - 1) * 0.25;
       } else if (this.state === "no") {

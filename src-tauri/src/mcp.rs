@@ -312,35 +312,28 @@ impl Registry {
     pub fn ensure(&self, app: &tauri::AppHandle, server: &McpServer) -> Result<Vec<Value>, String> {
         let slot = self.slot(&server.name);
         let mut guard = slot.lock().unwrap();
-        match &mut *guard {
-            Slot::Connected(_) => {}
-            Slot::Error(prev) => {
-                // Try to (re)connect; on failure, cache the new error.
-                match Self::connect(app, server) {
-                    Ok(conn) => {
-                        let tools = conn.tools().to_vec();
-                        *guard = Slot::Connected(conn);
-                        return Ok(tools);
-                    }
+        match &*guard {
+            Slot::Connected(conn) => Ok(conn.tools().to_vec()),
+            Slot::Error(_) => {
+                // (Re)connect; cache success or the new error.
+                let conn = match Self::connect(app, server) {
+                    Ok(c) => c,
                     Err(e) => {
-                        *prev = e.clone();
+                        *guard = Slot::Error(e.clone());
                         return Err(e);
                     }
-                }
+                };
+                let tools = conn.tools().to_vec();
+                *guard = Slot::Connected(conn);
+                Ok(tools)
             }
-        }
-        // Already connected: return its cached tools.
-        if let Slot::Connected(conn) = &*guard {
-            Ok(conn.tools().to_vec())
-        } else {
-            unreachable!("guard was just matched as Connected")
         }
     }
 
     /// How many tools an enabled, connected server advertises (0 if not
     /// connected or failed). Used for the UI "connected · N tools" status.
-    pub fn tool_count(&self, server: &McpServer) -> usize {
-        let slot = self.slot(&server.name);
+    pub fn tool_count(&self, name: &str) -> usize {
+        let slot = self.slot(name);
         let guard = slot.lock().unwrap();
         match &*guard {
             Slot::Connected(conn) => conn.tools().len(),
@@ -430,18 +423,7 @@ pub(crate) fn flatten_mcp_content(result: &Value) -> String {
     if out.trim().is_empty() {
         out = serde_json::to_string(result).unwrap_or_else(|_| "(empty result)".into());
     }
-    if out.len() > crate::MAX_OUTPUT {
-        // Truncate on a UTF-8 char boundary (plain `truncate` panics mid-char,
-        // e.g. on emoji/CJK in MCP results at the cut point).
-        let cut = out
-            .char_indices()
-            .take_while(|(i, _)| *i <= crate::MAX_OUTPUT)
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(crate::MAX_OUTPUT);
-        out.truncate(cut);
-        out.push_str("\n…[truncated]");
-    }
+    crate::truncate_output(&mut out);
     out
 }
 
@@ -544,6 +526,24 @@ pub fn is_destructive(tool: &Value) -> bool {
 /// `mcp__<server>__<tool>` — the form we advertise and that the model calls.
 pub(crate) fn namespaced(server: &str, tool: &str) -> String {
     format!("mcp__{server}__{tool}")
+}
+
+/// Derive a server's display/storage name from its URL (the leading label of
+/// the host, minus an `mcp.` prefix). Mirrors the UI's `deriveName` so Rust
+/// tooling (examples, tests) produces the same name → same token-file path as
+/// the app.
+pub fn derive_name(url: &str) -> String {
+    let host = url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned))
+        .unwrap_or_default();
+    let stripped = host.strip_prefix("mcp.").unwrap_or(&host);
+    stripped
+        .split('.')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "service".into())
 }
 /// Split a namespaced tool name back into (server, tool).
 fn parse_namespaced(full: &str) -> Option<(&str, &str)> {
@@ -835,11 +835,10 @@ mod tests {
         );
     }
 
-    /// End-to-end characterization of the stdio MCP client against a local echo
-    /// server fixture. This is the safety net for any rewrite of the hand-rolled
-    /// client (e.g. onto rmcp): spawn → initialize → tools/list → tools/call,
-    /// banner skipping, and destructive detection on the listed tools. Runs when
-    /// `bun` or `node` is available; skips gracefully otherwise.
+    /// End-to-end characterization of the stdio MCP client against a local
+    /// echo-server fixture: spawn → initialize → tools/list → tools/call, plus
+    /// destructive detection on the listed tools. Runs when `bun` or `node` is
+    /// available; skips gracefully otherwise.
     #[test]
     fn stdio_client_end_to_end() {
         let mut runner = None;
@@ -872,8 +871,8 @@ mod tests {
         let mut conn =
             RmcpConnection::connect_stdio(&server).expect("stdio connect should succeed");
 
-        // tools/list returned both tools, and the non-JSON startup banner was
-        // skipped (otherwise we'd see 3 tools or fail to parse).
+        // tools/list returned both tools (the echo fixture exposes exactly
+        // "echo" and "delete_thing").
         let names: Vec<&str> = conn
             .tools
             .iter()

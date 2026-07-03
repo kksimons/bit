@@ -2,14 +2,10 @@
 // characterization test (tests/mcp in mcp.rs). Pure node:readline, no deps —
 // runs under `bun` or `node`.
 //
-// - Prints a non-JSON banner line on startup (bit's client must skip these).
 // - Answers initialize / tools/list / tools/call over newline-delimited JSON-RPC.
 // - Exposes "echo" (read-only by name) and "delete_thing" (destructive by name),
 //   so the test can exercise bit's destructive-detection + namespacing too.
 import readline from "node:readline";
-
-// Non-JSON banner: some real servers (e.g. gmail-mcp-imap) print these to stdout.
-process.stdout.write("echo-mcp ready (non-json banner to skip)\n");
 
 const TOOLS = [
   {

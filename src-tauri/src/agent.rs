@@ -72,10 +72,9 @@ fn workflows_context(app: &tauri::AppHandle) -> String {
     s
 }
 
-/// List the user's connected MCP services so the model knows which external
-/// apps it can reach. Only counts servers whose tools are actually live (enabled
-/// AND connected) — that's exactly what `tool_defs` advertises, so the prompt
-/// never claims a service is available when its tools aren't in the list.
+/// Lists the user's connected MCP services so the model knows which external
+/// apps it can reach. Only counts servers whose tools are actually live, which
+/// is exactly what `tool_defs` advertises.
 fn mcp_context(app: &tauri::AppHandle) -> String {
     let registry = app.state::<crate::mcp::Registry>();
     let mut lines: Vec<String> = Vec::new();
@@ -83,7 +82,7 @@ fn mcp_context(app: &tauri::AppHandle) -> String {
         if !s.enabled {
             continue;
         }
-        let n = registry.tool_count(&s);
+        let n = registry.tool_count(&s.name);
         if n > 0 {
             lines.push(format!(
                 "  - {} ({} tools, call them as mcp__{}__<tool>)",
@@ -110,7 +109,6 @@ pub fn ask(
 ) -> Result<(bool, u8, usize), String> {
     let dev = crate::config::load_settings(app).developer_mode;
     let mut tools = tools::definitions(dev);
-    // Merge in any enabled MCP servers' tools (namespaced mcp__<server>__<tool>).
     tools
         .as_array_mut()
         .expect("definitions always returns an array")
@@ -123,8 +121,8 @@ pub fn ask(
     }
 }
 
-/// Run one tool, persist it to memory, nudge the thinking animation, and return
-/// (output, is_error). Centralized so both provider loops stay in sync.
+/// Run one tool, log it to memory, nudge the thinking animation. Shared by both
+/// provider loops.
 fn run_and_log(app: &tauri::AppHandle, name: &str, input: &Value) -> (String, bool) {
     let t0 = std::time::Instant::now();
     let (text, is_error) = match tools::execute(app, name, input) {
@@ -156,7 +154,6 @@ fn ask_anthropic(
     let mut tools_called = 0usize;
 
     for _ in 0..MAX_TURNS {
-        // Heartbeat: the Bit is "thinking" through this turn.
         crate::nudge_thinking(app);
         let body = json!({
             "model": cfg.model,
@@ -212,7 +209,7 @@ fn ask_anthropic(
 
 // ---------- OpenAI Chat Completions API (OpenAI, OpenRouter) ----------
 
-/// Convert our Anthropic-style tool defs to OpenAI's function-tool shape.
+/// Convert Anthropic-style tool defs to OpenAI's function-tool shape.
 fn to_openai_tools(anthropic: &Value) -> Value {
     let arr = anthropic.as_array().cloned().unwrap_or_default();
     let out: Vec<Value> = arr
@@ -308,10 +305,8 @@ fn ask_openai(
 
 // ---------- shared ----------
 
-/// A single shared HTTP agent so TCP/TLS connections are pooled and reused
-/// across turns (and across asks). The LLM provider gets two or more POSTs per
-/// request; reusing the connection skips a TLS handshake on every turn after
-/// the first, trimming the processing gap the user feels.
+/// One shared HTTP agent so connections are pooled across turns, skipping a TLS
+/// handshake on every POST after the first.
 fn http() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(ureq::agent)

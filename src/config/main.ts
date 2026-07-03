@@ -16,7 +16,6 @@ interface GhosttyTab {
   title?: string;
 }
 interface Workflow {
-  id: string;
   name: string;
   trigger_phrases: string[];
   enabled: boolean;
@@ -87,8 +86,7 @@ async function loadSettings() {
   $("status").textContent = s.has_key ? "Key saved." : "No API key set yet.";
 }
 
-// Switching provider prefills its default endpoint + model (and reminds you the
-// key is per-provider).
+// Switching provider prefills its default endpoint + model.
 elSel("provider").addEventListener("change", () => {
   const d = PROVIDER_DEFAULTS[elSel("provider").value];
   if (d) {
@@ -103,8 +101,7 @@ async function persistSettings(): Promise<boolean> {
   const key = elInput("api_key").value.trim();
   try {
     await invoke("save_settings", {
-      // The backend takes a single `settings: Settings` struct (Tauri
-      // deserializes this object straight into it) + a separate `apiKey`.
+      // The backend takes a `settings` struct + a separate `apiKey`.
       settings: {
         provider: elSel("provider").value,
         base_url: elInput("base_url").value.trim(),
@@ -129,7 +126,7 @@ $("save").addEventListener("click", async () => {
   }
 });
 
-// Developer mode toggles immediately (with a confirm, since it grants raw power).
+// Developer mode toggles immediately, with a confirm.
 elInput("dev_mode").addEventListener("change", async () => {
   if (
     elInput("dev_mode").checked &&
@@ -148,7 +145,6 @@ elInput("dev_mode").addEventListener("change", async () => {
 });
 
 // ================= Bit size =================
-// Live-preview (resize the overlay as you drag) and persist on release.
 const sizeInput = elInput("size");
 sizeInput.addEventListener("input", () => {
   const v = parseFloat(sizeInput.value);
@@ -184,7 +180,7 @@ $("dnd_setup").addEventListener("click", async () => {
 });
 $("dnd_recheck").addEventListener("click", refreshDnd);
 
-// ================= Memory: reveal activity.jsonl + context.md in Finder =================
+// ================= Memory =================
 $("open_memory").addEventListener("click", () => {
   void invoke("open_memory_folder").catch((e) => console.error(e));
 });
@@ -280,9 +276,7 @@ function blankStep(type: Step["type"]): Step {
 }
 
 function openEditor(wf: Workflow | null) {
-  editing = wf
-    ? structuredClone(wf)
-    : { id: "", name: "", trigger_phrases: [], enabled: true, steps: [] };
+  editing = wf ? structuredClone(wf) : { name: "", trigger_phrases: [], enabled: true, steps: [] };
   $("editor_title").textContent = wf ? "Edit workflow" : "New workflow";
   elInput("wf_name").value = editing.name;
   elInput("wf_triggers").value = editing.trigger_phrases.join(", ");
@@ -507,8 +501,6 @@ function escapeHtml(s: string): string {
 }
 
 // ================= MCP connections =================
-// Gallery-first UX: preset buttons (Gmail, …) that only need a credential,
-// with a raw stdio editor hidden under “Advanced” for power users.
 
 interface PresetFieldView {
   env_key: string;
@@ -557,7 +549,7 @@ interface ToolView {
 }
 
 let presets: PresetView[] = [];
-/// The preset the credential editor is collecting fields for (null when closed).
+// The preset the credential editor is collecting fields for (null when closed).
 let editingPreset: PresetView | null = null;
 
 async function loadPresets() {
@@ -568,7 +560,7 @@ async function loadPresets() {
 function renderPresets() {
   const root = $("mcp_presets");
   root.innerHTML = "";
-  // Only show presets the user hasn’t added yet (avoid duplicate connections).
+  // Only show presets the user hasn't added yet.
   const added = new Set(mcpServers.map((s) => s.preset));
   for (const p of presets) {
     if (added.has(p.id)) continue;
@@ -645,7 +637,7 @@ function renderMcpServers() {
   }
 }
 
-/// Flatten a server view back into the persistable shape (drops transient status).
+// Flatten a server view into the persistable shape (drops transient status).
 function toServer(s: McpServerView): McpServer {
   return {
     name: s.name,
@@ -680,7 +672,7 @@ function openPresetEditor(p: PresetView) {
     wrap.appendChild(input);
     fields.appendChild(wrap);
   }
-  // Show per-preset help (currently Gmail only).
+  // Show per-preset help (Gmail only).
   $("mcp_help_gmail").classList.toggle("hidden", p.id !== "gmail");
   $("mcp_editor_backdrop").classList.remove("hidden");
 }
@@ -730,10 +722,6 @@ $("mcp_cancel").addEventListener("click", closePresetEditor);
 $("mcp_editor_close").addEventListener("click", closePresetEditor);
 
 // ================= Per-tool toggles =================
-// Modal listing a server's tools with checkboxes + a “⚠ destructive” badge on
-// any Bit flags possibly-destructive (real annotations when the server gives
-// them, else a name heuristic). Toggling sends the full new denylist; saving is
-// instant (no reconnect — filtering happens at advertise/call time).
 let toolsServer: string | null = null;
 let toolsList: ToolView[] = [];
 
@@ -843,9 +831,8 @@ $("mcp_custom_add").addEventListener("click", async () => {
   }
 });
 
-// Add a remote (HTTP) MCP server by URL. This kicks off the OAuth flow: the
-// backend opens a browser for sign-in and runs a loopback callback server on
-// :8473. Name defaults to the URL host so users only type one thing.
+// Add a remote (HTTP) MCP server by URL. Kicks off the OAuth flow: the backend
+// opens a browser for sign-in and runs a loopback callback on :8473.
 const deriveName = (url: string): string => {
   try {
     return new URL(url).hostname.replace(/^mcp\./, "").split(".")[0] || "service";
@@ -871,9 +858,8 @@ $("mcp_url_add")?.addEventListener("click", async () => {
   const btn = $("mcp_url_add") as HTMLButtonElement | null;
   if (btn) btn.disabled = true;
   try {
-    // Blocks until the user signs in (or 5min timeout). The backend opens the
-    // browser itself; the user just needs to complete consent there. Returns
-    // the URL actually used (may differ from input if /sse → /mcp was applied).
+    // Blocks until the user signs in (or 5min timeout). Returns the URL actually
+    // used (may differ from input if /sse → /mcp was applied).
     const resolved = await invoke<string>("add_http_server", { name, url });
     status.textContent =
       resolved !== url
@@ -888,14 +874,12 @@ $("mcp_url_add")?.addEventListener("click", async () => {
   }
 });
 
-// The backend wraps the autostart plugin in its own commands so it can refuse in
-// dev builds (the debug binary can’t find its UI after a reboot). Nothing to
-// persist — the OS registration is the source of truth.
+// The backend wraps the autostart plugin in its own commands so it can refuse
+// in dev builds. The OS registration is the source of truth.
 async function loadAutostart() {
   try {
     elInput("autostart").checked = await invoke<boolean>("autostart_state");
   } catch (e) {
-    // Reading can’t fail in a way the user needs to know about; just log it.
     console.warn("[bit] autostart state unavailable:", e);
   }
 }
@@ -906,17 +890,13 @@ elInput("autostart")?.addEventListener("change", async () => {
     await invoke("set_autostart", { enabled: on });
   } catch (e) {
     elInput("autostart").checked = !on; // revert on failure
-    // The dev-build refusal message is actionable — show it as an alert so it
-    // isn’t lost in the console.
     alert(`${e}`);
   }
 });
 
 // ================= Transcription models =================
-// A picker (Handy-style): each model is a card with name, size, languages, a
-// download button (with progress), an activate button, and an “active” badge.
-// First run with no model → the backend opens Settings; this list shows what
-// to do.
+// Each model is a card with name, size, languages, download/activate buttons,
+// and an “active” badge. First run with no model → the backend opens Settings.
 
 interface SttModelView {
   id: string;
@@ -996,8 +976,7 @@ function actionButton(m: SttModelView): string {
           <button type="button" class="del ghost danger">Delete</button>`;
 }
 
-/// The active model id, for `persistSettings` to round-trip. Falls back to the
-/// default if nothing's loaded yet (shouldn't happen — loadSttModels runs first).
+// The active model id for `persistSettings` to round-trip.
 function currentSttModel(): string {
   return sttModels.find((m) => m.active)?.id ?? "parakeet-v2";
 }

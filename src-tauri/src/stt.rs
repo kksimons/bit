@@ -7,12 +7,12 @@ use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams};
 
 // ============================ model registry ============================
 //
-// Bit supports two local transcription models, picked by the user in Settings:
+// Two local transcription models, picked by the user in Settings:
 //   - Parakeet V2: English-only, ~700 MB, best English accuracy (the default).
 //   - Whisper Base: 99 languages, ~141 MB, multilingual.
-// Both ship via `transcribe-rs`. Each `ModelSpec` knows its id, display info,
-// download source, and the on-disk files that mean "fully downloaded". The
-// loaded model is held as a `LoadedModel` enum so `Stt` can swap backends.
+// Each `ModelSpec` knows its id, display info, download source, and the on-disk
+// files that mean "fully downloaded". The loaded model is held as a
+// `LoadedModel` enum so `Stt` can swap backends.
 
 /// Catalog entry for one transcription model.
 pub struct ModelSpec {
@@ -50,8 +50,7 @@ const WHISPER_FILES: &[(&str, &str)] = &[(
     "ggml-base.bin",
 )];
 
-/// The full menu. Order = display order; the first entry is the default for new
-/// users (matched by `DEFAULT_MODEL_ID`).
+/// The full menu. Order = display order; the first entry is the default.
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: "parakeet-v2",
@@ -71,12 +70,10 @@ pub const MODELS: &[ModelSpec] = &[
     },
 ];
 
-/// The active model for users who haven't picked one yet. Existing users with
-/// the Parakeet files already on disk are migrated to this on first run.
 pub const DEFAULT_MODEL_ID: &str = "parakeet-v2";
 
-/// Look up a spec by id. Falls back to the default if unknown (defensive — a
-/// stale `active_model` setting naming a removed model shouldn't break STT).
+/// Look up a spec by id. Falls back to the default if unknown so a stale
+/// `active_model` setting can't break STT.
 pub fn spec(id: &str) -> &'static ModelSpec {
     MODELS
         .iter()
@@ -89,23 +86,6 @@ pub fn model_dir(app_data: &Path, model_id: &str) -> PathBuf {
     app_data.join("models").join(model_id)
 }
 
-/// One-time migration: pre-0.2.0 Bit stored Parakeet under the full HuggingFace
-/// repo name (`parakeet-tdt-0.6b-v2`) rather than the model id (`parakeet-v2`).
-/// Rename it into place so existing users keep working instead of being told
-/// to redownload. Idempotent — no-op if already migrated or absent. Best-effort;
-/// a failure just means the user re-downloads via the picker.
-pub fn migrate_legacy_dirs(app_data: &Path) {
-    let old = app_data.join("models").join("parakeet-tdt-0.6b-v2");
-    let new = model_dir(app_data, "parakeet-v2");
-    if old.is_dir() && !new.is_dir() {
-        if let Err(e) = std::fs::rename(&old, &new) {
-            eprintln!("[bit] couldn't migrate parakeet model dir: {e}");
-        } else {
-            println!("[bit] migrated parakeet model dir → parakeet-v2/");
-        }
-    }
-}
-
 /// Are all of this model's files present?
 pub fn model_ready(app_data: &Path, model_id: &str) -> bool {
     let spec = spec(model_id);
@@ -114,8 +94,7 @@ pub fn model_ready(app_data: &Path, model_id: &str) -> bool {
 }
 
 /// Download any missing files for a model. `on_progress` is called with
-/// (file_index, total_files, filename) as each completes — used to drive the
-/// download progress in the picker UI.
+/// (file_index, total_files, filename) as each completes.
 pub fn download_model<F: FnMut(usize, usize, &str)>(
     app_data: &Path,
     model_id: &str,
@@ -131,7 +110,6 @@ pub fn download_model<F: FnMut(usize, usize, &str)>(
             on_progress(i + 1, total, name);
             continue;
         }
-        println!("[bit] downloading {name} …");
         let mut resp = ureq::get(*url)
             .call()
             .map_err(|e| format!("download {name}: {e}"))?;
@@ -139,14 +117,12 @@ pub fn download_model<F: FnMut(usize, usize, &str)>(
         let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
         std::io::copy(&mut resp.body_mut().as_reader(), &mut out).map_err(|e| e.to_string())?;
         std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
-        println!("[bit] downloaded {name}");
         on_progress(i + 1, total, name);
     }
     Ok(())
 }
 
-/// Delete a model's files from disk (used when the user removes a downloaded
-/// model they no longer want). Best-effort.
+/// Delete a model's files from disk. Best-effort.
 pub fn delete_model(app_data: &Path, model_id: &str) -> Result<(), String> {
     let dir = model_dir(app_data, model_id);
     if dir.exists() {
@@ -157,8 +133,7 @@ pub fn delete_model(app_data: &Path, model_id: &str) -> Result<(), String> {
 
 // ============================ the loaded model ============================
 
-/// A model loaded into memory, regardless of backend. Each backend's
-/// `transcribe_with` is called the same way; we just route by variant.
+/// A model loaded into memory, regardless of backend.
 enum LoadedModel {
     Parakeet(ParakeetModel),
     Whisper(WhisperEngine),
@@ -173,8 +148,6 @@ impl LoadedModel {
                 .map_err(|e| e.to_string()),
             LoadedModel::Whisper(m) => {
                 let params = WhisperInferenceParams {
-                    // Auto-detect language (Whisper's strength); suppress the
-                    // chatty C++ realtime/progress logs that polluted earlier runs.
                     language: Some("auto".into()),
                     print_progress: false,
                     print_realtime: false,
@@ -190,14 +163,11 @@ impl LoadedModel {
     }
 }
 
-/// Holds the lazily-loaded active model. Loading is heavy and inference is
-/// serialized behind a mutex. The active model id is read from settings at
-/// load time, so a user switching models in Settings takes effect on the next
-/// `ensure_loaded` (which reloads if the id changed).
+/// Lazily-loaded active model. Inference is serialized behind a mutex. The
+/// active model id is read from settings at load time; switching models in
+/// Settings takes effect on the next `ensure_loaded`.
 pub struct Stt {
     model: Mutex<Option<LoadedModel>>,
-    /// The model id currently loaded (None = not loaded yet). Compared against
-    /// the configured active model to decide whether to reload on `ensure_loaded`.
     loaded_id: Mutex<Option<String>>,
     app_data: PathBuf,
 }
@@ -211,11 +181,8 @@ impl Stt {
         }
     }
 
-    /// Download (if needed) and load the configured active model. Heavy — call
-    /// off the UI thread. Reloads if the active model changed since last load.
-    /// `active_model_id` comes from settings (the caller reads it).
+    /// Download (if needed) and load the active model. Reloads if the id changed.
     pub fn ensure_loaded(&self, active_model_id: &str) -> Result<(), String> {
-        // Already loaded and still the active one, with a live model? Nothing to do.
         if let Some(id) = self.loaded_id.lock().unwrap().as_ref() {
             if id == active_model_id && self.model.lock().unwrap().is_some() {
                 return Ok(());
@@ -226,11 +193,9 @@ impl Stt {
             download_model(&self.app_data, active_model_id, |_, _, _| {})?;
         }
         let dir = model_dir(&self.app_data, active_model_id);
-        println!("[bit] loading model {active_model_id} …");
         let loaded = load_model(active_model_id, &dir)?;
         *self.model.lock().unwrap() = Some(loaded);
         *self.loaded_id.lock().unwrap() = Some(active_model_id.to_string());
-        println!("[bit] model loaded");
         Ok(())
     }
 
@@ -242,7 +207,6 @@ impl Stt {
     }
 }
 
-/// Instantiate a model backend from its on-disk files.
 fn load_model(model_id: &str, dir: &Path) -> Result<LoadedModel, String> {
     match model_id {
         "whisper-base" => {
@@ -276,16 +240,12 @@ mod tests {
 
     #[test]
     fn spec_falls_back_to_default_for_unknown_id() {
-        // A stale setting naming a removed model shouldn't panic — it falls
-        // back to the default, which is always present.
         let s = spec("nonexistent-future-model");
         assert_eq!(s.id, DEFAULT_MODEL_ID);
     }
 
     #[test]
     fn parakeet_and_whisper_have_disjoint_files() {
-        // Sanity: the two models must not share on-disk filenames (they live in
-        // separate dirs anyway, but this guards against copy-paste mistakes).
         let p_names: Vec<&str> = PARAKEET_FILES.iter().map(|(_, n)| *n).collect();
         let w_names: Vec<&str> = WHISPER_FILES.iter().map(|(_, n)| *n).collect();
         for name in &p_names {

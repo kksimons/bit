@@ -7,7 +7,6 @@ export interface BitPalette {
   emissive: number;
 }
 
-// Bit's per-state colors.
 export const COLORS: Record<BitState, BitPalette> = {
   neutral: { color: 0x00ddff, emissive: 0x0a7d96 },
   listening: { color: 0x46e8ff, emissive: 0x179fbe },
@@ -16,8 +15,8 @@ export const COLORS: Record<BitState, BitPalette> = {
   no: { color: 0xff3300, emissive: 0x9c1300 },
 };
 
-// Deterministic pseudo-random in [0,1) seeded by a face normal, so the
-// "no" stellation's irregular spikes are stable frame-to-frame.
+// Deterministic pseudo-random in [0,1) seeded by a face normal, so the "no"
+// stellation's irregular spikes are stable frame-to-frame.
 function pseudoRandom(n: THREE.Vector3): number {
   const s = Math.sin(n.x * 127.1 + n.y * 311.7 + n.z * 74.7) * 43758.5453;
   return s - Math.floor(s);
@@ -33,9 +32,6 @@ const keyOf = (v: THREE.Vector3) => `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.t
  *
  *  - icosahedron base -> 20 triangular spikes (neutral Bit)
  *  - dodecahedron base -> 12 pentagonal spikes (no Bit)
- *
- * @param spikeHeight how far each apex is pushed beyond the face centroid
- * @param randomize   0 = uniform spikes; >0 jitters per-face height by ±randomize
  */
 export function stellate(
   base: THREE.BufferGeometry,
@@ -126,11 +122,9 @@ export function stellate(
 export function buildGeometry(state: BitState): THREE.BufferGeometry {
   switch (state) {
     case "yes":
-      // plain octahedron
       return new THREE.OctahedronGeometry(1.25, 0);
     case "no":
-      // stellated dodecahedron: 12 long, irregular, aggressive spikes
-      // (kept compact so the spikes stay within the canvas)
+      // stellated dodecahedron: 12 long irregular spikes (kept compact)
       return stellate(new THREE.DodecahedronGeometry(0.8, 0), 0.65, 0.35);
     default:
       // neutral / listening / thinking: gently stellated icosahedron

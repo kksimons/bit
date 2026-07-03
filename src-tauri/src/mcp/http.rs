@@ -1,15 +1,14 @@
 //! HTTP (remote, OAuth) MCP transport, wrapping rmcp behind a sync facade.
 //!
-//! Where `mcp.rs`'s stdio client speaks newline JSON-RPC to a local subprocess,
-//! this module talks to remote Streamable-HTTP MCP servers (Notion, Sentry,
-//! GitHub, …) using the rmcp SDK, which owns the full OAuth 2.1 + PKCE + Dynamic
-//! Client Registration flow. Our job is: (1) plug in the file-backed credential
-//! store (`oauth.rs`), (2) run the interactive auth flow once (browser → loopback
-//! callback), (3) hold the live `RunningService` so tool calls reuse it.
+//! Talks to remote Streamable-HTTP MCP servers (Notion, Sentry, GitHub, …)
+//! using rmcp, which owns the full OAuth 2.1 + PKCE + Dynamic Client
+//! Registration flow. This module plugs in the file-backed credential store
+//! (`oauth.rs`), runs the interactive auth flow once (browser → loopback
+//! callback), and holds the live `RunningService` so tool calls reuse it.
 //!
 //! The agent loop is synchronous, so async rmcp calls are bridged with
-//! `tauri::async_runtime::handle().block_on(...)`. That's safe because the agent
-//! runs on plain `std::thread`s, not inside an async context.
+//! `tauri::async_runtime::handle().block_on(...)` — safe because the agent runs
+//! on plain `std::thread`s, not inside an async context.
 
 use std::time::Duration;
 
@@ -26,27 +25,17 @@ use super::oauth::{FileCredentialStore, REDIRECT_URI};
 use super::{tool_to_value, McpServer, RmcpConnection};
 
 /// Where a server's OAuth token file lives: `<config_dir>/mcp/<name>.token.json`.
-/// Mirrors `FileCredentialStore::path_for` but takes a plain path (no AppHandle)
-/// so the OAuth layer stays decoupled from Tauri and is testable.
 fn token_path(config_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     super::oauth::path_for_dir(config_dir, name)
 }
 
-/// Rewrite a known-incompatible transport URL to the Streamable-HTTP one Bit
-/// speaks. Per MCP convention, an SSE-only endpoint lives at `…/sse` and its
-/// Streamable-HTTP counterpart lives at `…/mcp`. Bit (via rmcp) can't do SSE at
-/// all, so a `/sse` URL is unusable as-is; we transparently use `/mcp` instead.
-///
-/// This MUST run before OAuth: the token is audience-bound to the URL it's
-/// minted for, so a `/sse`-audience token would be rejected by `/mcp` (we hit
-/// exactly this during testing). Normalizing up front means OAuth mints a
-/// `/mcp`-audience token that `connect` can use directly. Idempotent: a URL
-/// already ending in `/mcp` (or anything else) is returned unchanged.
+/// Rewrite an SSE-only endpoint URL to its Streamable-HTTP counterpart. Per MCP
+/// convention these live at `…/sse` and `…/mcp` respectively; rmcp can't do SSE.
+/// Must run before OAuth: the token is audience-bound to the URL it's minted
+/// for, so a `/sse`-audience token would be rejected by `/mcp`. Idempotent.
 pub fn normalize_url(url: &str) -> String {
-    // Strip a trailing slash so `/sse/` and `/sse` are handled the same.
     let trimmed = url.trim_end_matches('/');
     if let Some(prefix) = trimmed.strip_suffix("/sse") {
-        // Preserve any trailing slash the user included for tidiness.
         let slash = if url.ends_with('/') { "/" } else { "" };
         format!("{prefix}/mcp{slash}")
     } else {
@@ -55,8 +44,7 @@ pub fn normalize_url(url: &str) -> String {
 }
 
 /// If a connect error looks like a transport mismatch (404/405 from POSTing an
-/// initialize to an endpoint that only speaks SSE), append a hint pointing the
-/// user at the `/mcp` URL. Returns the (possibly annotated) error string.
+/// initialize to an SSE-only endpoint), append a hint pointing at the `/mcp` URL.
 fn with_transport_hint(url: &str, err: &str) -> String {
     let looks_like_not_found =
         err.contains("404") || err.contains("405") || err.contains("Method Not Allowed");
@@ -78,9 +66,8 @@ const CALLBACK_PORT: u16 = 8473;
 /// giving up. Generous: DCR + consent screens can take a while.
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Connect to a remote (HTTP) MCP server using stored OAuth credentials. Returns
-/// a live `RmcpConnection` (the same type stdio uses). `config_dir` is the app's
-/// config dir (where the `mcp/<name>.token.json` token file lives).
+/// Connect to a remote (HTTP) MCP server using stored OAuth credentials.
+/// `config_dir` is where the `mcp/<name>.token.json` token file lives.
 pub fn connect(config_dir: &std::path::Path, server: &McpServer) -> Result<RmcpConnection, String> {
     let path = token_path(config_dir, &server.name);
     if !path.exists() {
@@ -126,14 +113,11 @@ pub fn connect(config_dir: &std::path::Path, server: &McpServer) -> Result<RmcpC
     })
 }
 
-/// Run the interactive OAuth flow for a server and persist the resulting token.
-/// Steps: discover metadata → DCR-register → open browser → wait for loopback
-/// callback → exchange code → (the FileCredentialStore saves automatically).
-/// `config_dir` is the app's config dir (where the token file is written).
+/// Run the interactive OAuth flow and persist the resulting token:
+/// discover → DCR-register → browser → loopback callback → exchange.
 ///
-/// Returns the URL actually used for OAuth — which may differ from the input if
-/// `normalize_url` rewrote a `/sse` endpoint to `/mcp`. The caller should save
-/// the returned URL so the token's audience matches what `connect` will use.
+/// Returns the URL actually used (may differ from the input if `normalize_url`
+/// rewrote `/sse` → `/mcp`); the caller saves it so the token's audience matches.
 pub fn run_oauth_flow(
     config_dir: &std::path::Path,
     name: &str,
@@ -147,14 +131,13 @@ pub fn run_oauth_flow(
             .await
             .map_err(|e| format!("auth init failed: {e}"))?;
 
-        // Plug in our file store BEFORE starting, so the token exchange writes
-        // straight to disk (no in-memory-only token that we'd have to persist).
+        // Plug in our file store before starting, so the token exchange
+        // writes straight to disk.
         if let OAuthState::Unauthorized(ref mut mgr) = state {
             mgr.set_credential_store(FileCredentialStore::new(path));
         }
 
-        // Empty scopes ⇒ let the SDK auto-select from the server's advertised
-        // scopes (the standard "just sign in" UX, parity with `claude mcp add`).
+        // Empty scopes ⇒ let the SDK auto-select from the server's advertised scopes.
         state
             .start_authorization(&[], REDIRECT_URI, Some("Bit"))
             .await
@@ -165,14 +148,13 @@ pub fn run_oauth_flow(
             _ => return Err("unexpected OAuth state after start_authorization".into()),
         };
 
-        // Open the user's browser at the consent URL, then await the callback.
+        // Open the browser at the consent URL, then await the callback.
         open_browser(&auth_url);
         let (code, csrf) = wait_for_callback()
             .await
             .map_err(|e| format!("authorization callback failed: {e}"))?;
 
-        // Exchange the code for a token. The FileCredentialStore::save runs as
-        // part of this, persisting the token bundle atomically.
+        // Exchange the code; FileCredentialStore::save persists the token atomically.
         if let OAuthState::Session(s) = &state {
             s.handle_callback(&code, &csrf)
                 .await
@@ -183,8 +165,7 @@ pub fn run_oauth_flow(
     })
 }
 
-/// Open `url` in the user's default browser. macOS uses `open`; the fallbacks
-/// cover Linux/Windows for completeness though Bit is Mac-focused.
+/// Open `url` in the user's default browser.
 fn open_browser(url: &str) {
     let cmd = if cfg!(target_os = "macos") {
         "open"
@@ -199,20 +180,14 @@ fn open_browser(url: &str) {
         .map_err(|e| eprintln!("[bit] couldn't open browser: {e}"));
 }
 
-/// Bind the loopback callback listener with `SO_REUSEADDR` set. This matters:
-/// if a previous OAuth flow was interrupted (app force-quit, dev process killed),
-/// the socket can linger in `TIME_WAIT` and a plain `bind` would fail with
-/// “Address already in use” for a minute or two. SO_REUSEADDR lets us rebind
-/// immediately. We also translate the “in use” error into a Bit-specific hint,
-/// since the most likely cause is a stale Bit process still holding the port.
-async fn bind_loopback(port: u16) -> Result<TcpListener, String> {
+/// Build the loopback listener socket: non-blocking, SO_REUSEADDR set, bound
+/// to 127.0.0.1. Extracted so the socket options are unit-testable without the
+/// non-determinism of bind→drop→rebind racing.
+fn build_loopback_socket(port: u16) -> Result<socket2::Socket, String> {
     use socket2::{Domain, Protocol, Socket, Type};
-
-    // Build a non-blocking std socket with SO_REUSEADDR, then hand it to tokio.
-    let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+    Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
         .and_then(|s| {
-            // Only ever listen on loopback — the OAuth callback must not be
-            // reachable from the network.
+            // Listen only on loopback — the callback must not be network-reachable.
             s.set_reuse_address(true)?;
             let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
             s.bind(&addr.into())?;
@@ -220,11 +195,16 @@ async fn bind_loopback(port: u16) -> Result<TcpListener, String> {
             s.set_nonblocking(true)?;
             Ok(s)
         })
-        .map_err(|e| format!("couldn't bind callback port {port}: {e}"))?;
+        .map_err(|e| format!("couldn't bind callback port {port}: {e}"))
+}
 
+/// Bind the loopback callback listener with SO_REUSEADDR, so an interrupted
+/// OAuth flow (socket lingering in TIME_WAIT) doesn't make the next bind fail
+/// with “Address already in use” for a minute or two.
+async fn bind_loopback(port: u16) -> Result<TcpListener, String> {
+    let sock = build_loopback_socket(port)?;
     TcpListener::from_std(sock.into()).map_err(|e| {
-        // The common user-facing case: another process owns the port. Most
-        // often that's a stale Bit (interrupted sign-in). Tell them that.
+        // AddrInUse is most often a stale Bit process holding the port.
         if e.kind() == std::io::ErrorKind::AddrInUse {
             format!(
                 "Bit's sign-in callback port {port} is already in use — likely a \
@@ -237,10 +217,9 @@ async fn bind_loopback(port: u16) -> Result<TcpListener, String> {
     })
 }
 
-/// Run a minimal loopback HTTP server on CALLBACK_PORT and wait for the OAuth
-/// `redirect_uri` callback (`GET /callback?code=…&state=…`). Returns the code
-/// and the CSRF `state` token. Times out after CALLBACK_TIMEOUT so a user who
-/// abandons sign-in doesn't hang the flow forever. Raw TCP — no extra deps.
+/// Minimal loopback HTTP server: wait for the OAuth `redirect_uri` callback
+/// (`GET /callback?code=…&state=…`) and return the code + CSRF state. Times
+/// out after CALLBACK_TIMEOUT so an abandoned sign-in doesn't hang forever.
 async fn wait_for_callback() -> Result<(String, String), String> {
     let listener = bind_loopback(CALLBACK_PORT).await?;
 
@@ -280,13 +259,15 @@ async fn wait_for_callback() -> Result<(String, String), String> {
             if let Some(q) = query {
                 let mut code = None;
                 let mut state = None;
-                for pair in q.split('&') {
-                    let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
-                    let val = percent_decode(v);
-                    match k {
-                        "code" => code = Some(val),
-                        "state" => state = Some(val),
-                        _ => {}
+                // Parse the querystring via the `url` crate (already a dep via
+                // reqwest) instead of hand-rolling percent-decoding + splitting.
+                if let Ok(u) = url::Url::parse(&format!("http://x/?{q}")) {
+                    for (k, v) in u.query_pairs() {
+                        match k.as_ref() {
+                            "code" => code = Some(v.into_owned()),
+                            "state" => state = Some(v.into_owned()),
+                            _ => {}
+                        }
                     }
                 }
                 if let (Some(c), Some(s)) = (code, state) {
@@ -307,60 +288,22 @@ async fn wait_for_callback() -> Result<(String, String), String> {
         })?
 }
 
-/// Minimal percent-decoding for the code/state query values (handles %2F etc.).
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(b) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
-                out.push(b);
-                i += 3;
-                continue;
-            }
-        }
-        if bytes[i] == b'+' {
-            out.push(b' ');
-        } else {
-            out.push(bytes[i]);
-        }
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn percent_decode_basics() {
-        assert_eq!(percent_decode("abc"), "abc");
-        assert_eq!(percent_decode("a%2Fb"), "a/b");
-        assert_eq!(percent_decode("%20"), " ");
-        assert_eq!(percent_decode("a+b"), "a b");
-        assert_eq!(percent_decode("%ZZ"), "%ZZ"); // bad hex passes through
-    }
 
     /// Reproduce the exact failure mode that bit the user: bind the callback
     /// port, drop it, and immediately rebind. Without SO_REUSEADDR this fails
     /// with “Address already in use” while the socket sits in TIME_WAIT.
     /// Uses an ephemeral port (not 8473) so parallel test runs don't collide.
-    #[tokio::test]
-    async fn loopback_rebinds_immediately_after_drop() {
-        let port = pick_ephemeral_port();
-        let first = bind_loopback(port)
-            .await
-            .expect("first bind should succeed");
-        drop(first);
-        // Rebind right away — this is where pre-hardening it failed.
-        let second = bind_loopback(port)
-            .await
-            .expect("rebind after drop should succeed (SO_REUSEADDR)");
-        drop(second);
+    /// The interrupted-OAuth-flow mitigation is SO_REUSEADDR on the loopback
+    /// socket. Verify it's actually set (deterministic), rather than
+    /// bind→drop→rebind racing, which is non-deterministic on macOS.
+    #[test]
+    fn loopback_socket_sets_reuseaddr() {
+        // Port 0 = OS picks at bind time, so there's no pre-pick collision window.
+        let sock = build_loopback_socket(0).expect("bind should succeed");
+        assert!(sock.reuse_address().unwrap(), "SO_REUSEADDR must be set");
     }
 
     #[test]
@@ -413,12 +356,5 @@ mod tests {
         // No hint on unrelated errors.
         let auth = with_transport_hint("https://mcp.example.com/sse", "Auth required");
         assert_eq!(auth, "Auth required");
-    }
-
-    /// Grab a free ephemeral port by binding a socket to :0 and reading the
-    /// assigned port, then dropping it (knowing bind_loopback sets SO_REUSEADDR).
-    fn pick_ephemeral_port() -> u16 {
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        l.local_addr().unwrap().port()
     }
 }

@@ -12,20 +12,6 @@ use std::collections::BTreeMap;
 
 use bit_lib::mcp;
 
-fn derive_name(url: &str) -> String {
-    let host = url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-        .unwrap_or_default();
-    let stripped = host.strip_prefix("mcp.").unwrap_or(&host);
-    stripped
-        .split('.')
-        .next()
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| "service".into())
-}
-
 fn app_config_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let dir = std::path::PathBuf::from(home)
@@ -39,7 +25,7 @@ fn main() {
     let url = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "https://mcp.notion.com/mcp".to_string());
-    let name = derive_name(&url);
+    let name = mcp::derive_name(&url);
     let dir = app_config_dir();
 
     let server = mcp::McpServer {
