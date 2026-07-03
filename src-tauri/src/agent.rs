@@ -1,6 +1,7 @@
 use crate::config::AgentConfig;
 use crate::{tools, workflows};
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 use tauri::Manager;
 
 const SYSTEM: &str = "You are Bit, a desktop companion: a floating geometric polyhedron. \
@@ -19,6 +20,13 @@ You manage named multi-step workflows: when the request matches a saved workflow
 trigger phrase, e.g. \"let's work on Heatsink\"), call run_workflow. When asked to set up or change \
 a routine, call save_workflow (note: drafts save disabled until the user enables them). \
 \
+You have long-term memory tools. recall_history searches your past actions and notes — call it \
+whenever the user refers to something done before (e.g. \"it\", \"that card\", \"the one I just made\", \
+\"what did I just do\") so you can recover context like a card number from a previous command. \
+remember saves a concise one-line lesson to memory for future recall — use it after a failure or \
+when you learn something durable about the user's setup (e.g. which columns a board has, how a \
+service is named). These persist across conversations. \
+\
 The request comes from speech-to-text and may be garbled. If you cannot confidently tell what they \
 want, do NOT guess — just answer \"no\". \
 \
@@ -30,10 +38,6 @@ for emphasis (\"yes yes yes\", \"no no no\") when the moment fits, but usually o
 message must be only the word yes or no, repeated 1 to 3 times, lowercase, nothing else.";
 
 const MAX_TURNS: usize = 8;
-
-fn is_openai(provider: &str) -> bool {
-    matches!(provider, "openai" | "openrouter")
-}
 
 fn base_url(cfg: &AgentConfig) -> String {
     let b = cfg.base_url.trim().trim_end_matches('/');
@@ -97,49 +101,63 @@ fn mcp_context(app: &tauri::AppHandle) -> String {
     }
 }
 
-/// Returns (verdict, times): true=yes/false=no, repeated 1..=3 for emphasis.
+/// Returns (verdict, times, tool_count): true=yes/false=no, repeated 1..=3 for
+/// emphasis, and how many tool calls the loop made.
 pub fn ask(
     app: &tauri::AppHandle,
     cfg: &AgentConfig,
     transcript: &str,
-) -> Result<(bool, u8), String> {
+) -> Result<(bool, u8, usize), String> {
     let dev = crate::config::load_settings(app).developer_mode;
     let mut tools = tools::definitions(dev);
     // Merge in any enabled MCP servers' tools (namespaced mcp__<server>__<tool>).
-    if let Some(arr) = tools.as_array_mut() {
-        arr.extend(crate::mcp::tool_defs(app));
-    }
-    if is_openai(&cfg.provider) {
-        ask_openai(app, cfg, transcript, &to_openai_tools(&tools))
+    tools
+        .as_array_mut()
+        .expect("definitions always returns an array")
+        .extend(crate::mcp::tool_defs(app));
+    let system = format!("{SYSTEM}{}{}", workflows_context(app), mcp_context(app));
+    if matches!(cfg.provider.as_str(), "openai" | "openrouter") {
+        ask_openai(app, cfg, &system, transcript, &to_openai_tools(&tools))
     } else {
-        ask_anthropic(app, cfg, transcript, &tools)
+        ask_anthropic(app, cfg, &system, transcript, &tools)
     }
+}
+
+/// Run one tool, persist it to memory, nudge the thinking animation, and return
+/// (output, is_error). Centralized so both provider loops stay in sync.
+fn run_and_log(app: &tauri::AppHandle, name: &str, input: &Value) -> (String, bool) {
+    let t0 = std::time::Instant::now();
+    let (text, is_error) = match tools::execute(app, name, input) {
+        Ok(t) => (t, false),
+        Err(e) => (e, true),
+    };
+    crate::memory::log_tool_call(app, name, input, &text, is_error, t0.elapsed().as_millis());
+    crate::nudge_thinking(app);
+    (text, is_error)
 }
 
 // ---------- Anthropic Messages API (Z.AI, Anthropic) ----------
 
-fn anthropic_headers(cfg: &AgentConfig) -> Vec<(String, String)> {
-    let mut h = vec![("anthropic-version".into(), "2023-06-01".into())];
-    if cfg.provider == "anthropic" {
-        h.push(("x-api-key".into(), cfg.api_key.clone()));
-    } else {
-        h.push(("authorization".into(), format!("Bearer {}", cfg.api_key)));
-    }
-    h
-}
-
 fn ask_anthropic(
     app: &tauri::AppHandle,
     cfg: &AgentConfig,
+    system: &str,
     transcript: &str,
     tools: &Value,
-) -> Result<(bool, u8), String> {
+) -> Result<(bool, u8, usize), String> {
     let url = format!("{}/v1/messages", base_url(cfg));
-    let headers = anthropic_headers(cfg);
-    let system = format!("{SYSTEM}{}{}", workflows_context(app), mcp_context(app));
+    let mut headers = vec![("anthropic-version".into(), "2023-06-01".into())];
+    if cfg.provider == "anthropic" {
+        headers.push(("x-api-key".into(), cfg.api_key.clone()));
+    } else {
+        headers.push(("authorization".into(), format!("Bearer {}", cfg.api_key)));
+    }
     let mut messages: Vec<Value> = vec![json!({ "role": "user", "content": transcript })];
+    let mut tools_called = 0usize;
 
     for _ in 0..MAX_TURNS {
+        // Heartbeat: the Bit is "thinking" through this turn.
+        crate::nudge_thinking(app);
         let body = json!({
             "model": cfg.model,
             "max_tokens": 1024,
@@ -162,14 +180,11 @@ fn ask_anthropic(
                 if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
                     continue;
                 }
-                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
                 let id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
                 let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
-                println!("[bit] tool: {name} {input}");
-                let (text, is_error) = match tools::execute(app, name, &input) {
-                    Ok(t) => (t, false),
-                    Err(e) => (e, true),
-                };
+                let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                let (text, is_error) = run_and_log(app, name, &input);
+                tools_called += 1;
                 results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": id,
@@ -189,24 +204,13 @@ fn ask_anthropic(
                 }
             }
         }
-        return Ok(reduce_verdict(&text));
+        let (verdict, times) = reduce_verdict(&text);
+        return Ok((verdict, times, tools_called));
     }
     Err("tool loop exceeded max turns".into())
 }
 
 // ---------- OpenAI Chat Completions API (OpenAI, OpenRouter) ----------
-
-fn openai_headers(cfg: &AgentConfig) -> Vec<(String, String)> {
-    let mut h = vec![("authorization".into(), format!("Bearer {}", cfg.api_key))];
-    if cfg.provider == "openrouter" {
-        h.push((
-            "http-referer".into(),
-            "https://github.com/kksimons/bit".into(),
-        ));
-        h.push(("x-title".into(), "Bit".into()));
-    }
-    h
-}
 
 /// Convert our Anthropic-style tool defs to OpenAI's function-tool shape.
 fn to_openai_tools(anthropic: &Value) -> Value {
@@ -230,23 +234,31 @@ fn to_openai_tools(anthropic: &Value) -> Value {
 fn ask_openai(
     app: &tauri::AppHandle,
     cfg: &AgentConfig,
+    system: &str,
     transcript: &str,
     tools: &Value,
-) -> Result<(bool, u8), String> {
+) -> Result<(bool, u8, usize), String> {
     let url = format!("{}/chat/completions", base_url(cfg));
-    let headers = openai_headers(cfg);
-    let system = format!("{SYSTEM}{}{}", workflows_context(app), mcp_context(app));
+    let mut headers = vec![("authorization".into(), format!("Bearer {}", cfg.api_key))];
+    if cfg.provider == "openrouter" {
+        headers.push((
+            "http-referer".into(),
+            "https://github.com/kksimons/bit".into(),
+        ));
+        headers.push(("x-title".into(), "Bit".into()));
+    }
     let mut messages: Vec<Value> = vec![
         json!({ "role": "system", "content": system }),
         json!({ "role": "user", "content": transcript }),
     ];
+    let mut tools_called = 0usize;
 
     for _ in 0..MAX_TURNS {
+        crate::nudge_thinking(app);
         let body = json!({
             "model": cfg.model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": "auto",
         });
         let v = post(&url, &headers, body)?;
         let msg = v
@@ -276,8 +288,8 @@ fn ask_openai(
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
                 let input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
-                println!("[bit] tool: {name} {input}");
-                let result = tools::execute(app, name, &input).unwrap_or_else(|e| e);
+                let (result, _is_error) = run_and_log(app, name, &input);
+                tools_called += 1;
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
@@ -288,15 +300,25 @@ fn ask_openai(
         }
 
         let text = msg.get("content").and_then(|c| c.as_str()).unwrap_or("");
-        return Ok(reduce_verdict(text));
+        let (verdict, times) = reduce_verdict(text);
+        return Ok((verdict, times, tools_called));
     }
     Err("tool loop exceeded max turns".into())
 }
 
 // ---------- shared ----------
 
+/// A single shared HTTP agent so TCP/TLS connections are pooled and reused
+/// across turns (and across asks). The LLM provider gets two or more POSTs per
+/// request; reusing the connection skips a TLS handshake on every turn after
+/// the first, trimming the processing gap the user feels.
+fn http() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| ureq::AgentBuilder::new().build())
+}
+
 fn post(url: &str, headers: &[(String, String)], body: Value) -> Result<Value, String> {
-    let mut req = ureq::post(url).set("content-type", "application/json");
+    let mut req = http().post(url).set("content-type", "application/json");
     for (k, v) in headers {
         req = req.set(k.as_str(), v.as_str());
     }

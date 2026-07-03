@@ -11,31 +11,25 @@
 //! `tauri::async_runtime::handle().block_on(...)`. That's safe because the agent
 //! runs on plain `std::thread`s, not inside an async context.
 
-use std::sync::Arc;
 use std::time::Duration;
 
-use rmcp::model::{CallToolRequestParams, ClientInfo};
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::model::ClientInfo;
 use rmcp::transport::auth::{AuthClient, AuthorizationManager, OAuthState};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
 use rmcp::ServiceExt;
-use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
 use super::oauth::{FileCredentialStore, REDIRECT_URI};
-use super::{flatten_mcp_content, McpServer};
+use super::{tool_to_value, McpServer, RmcpConnection};
 
 /// Where a server's OAuth token file lives: `<config_dir>/mcp/<name>.token.json`.
 /// Mirrors `FileCredentialStore::path_for` but takes a plain path (no AppHandle)
 /// so the OAuth layer stays decoupled from Tauri and is testable.
 fn token_path(config_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    config_dir
-        .join("mcp")
-        .join(format!("{}.token.json", super::oauth::sanitize_name(name)))
+    super::oauth::path_for_dir(config_dir, name)
 }
 
 /// Rewrite a known-incompatible transport URL to the Streamable-HTTP one Bit
@@ -84,103 +78,52 @@ const CALLBACK_PORT: u16 = 8473;
 /// giving up. Generous: DCR + consent screens can take a while.
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// The concrete rmcp client service type we hold between calls.
-type ClientService = RunningService<RoleClient, ClientInfo>;
-
-/// A live connection to a remote (HTTP) MCP server. Holds the rmcp
-/// `RunningService` (so the session, auth, and transport persist) plus the
-/// cached tool list in the same raw-Value shape the stdio path uses.
-pub struct HttpConnection {
-    service: Arc<Mutex<Option<ClientService>>>,
-    tools: Vec<Value>,
-}
-
-impl HttpConnection {
-    /// The cached tools (raw serde Values; namespaced later by `tool_defs`).
-    pub fn tools(&self) -> &[Value] {
-        &self.tools
+/// Connect to a remote (HTTP) MCP server using stored OAuth credentials. Returns
+/// a live `RmcpConnection` (the same type stdio uses). `config_dir` is the app's
+/// config dir (where the `mcp/<name>.token.json` token file lives).
+pub fn connect(config_dir: &std::path::Path, server: &McpServer) -> Result<RmcpConnection, String> {
+    let path = token_path(config_dir, &server.name);
+    if !path.exists() {
+        return Err("not authenticated — use “Add a service” in Settings first".into());
     }
 
-    /// Connect using stored credentials. Returns Err if the server hasn't been
-    /// authenticated yet (no token file) or the token/transport is broken.
-    /// `config_dir` is the app's config dir (where the `mcp/<name>.token.json`
-    /// token file lives) — pass the same dir used for the OAuth flow.
-    pub fn connect(config_dir: &std::path::Path, server: &McpServer) -> Result<Self, String> {
-        let path = token_path(config_dir, &server.name);
-        if !path.exists() {
-            return Err("not authenticated — use “Add a service” in Settings first".into());
+    let url = normalize_url(&server.url);
+    tauri::async_runtime::handle().block_on(async move {
+        let mut mgr = AuthorizationManager::new(&url)
+            .await
+            .map_err(|e| format!("auth setup failed: {e}"))?;
+        mgr.set_credential_store(FileCredentialStore::new(path));
+        let have_creds = mgr
+            .initialize_from_store()
+            .await
+            .map_err(|e| format!("credential load failed: {e}"))?;
+        if !have_creds {
+            return Err("not authenticated — use “Add a service” in Settings first".to_string());
         }
-
-        let url = normalize_url(&server.url);
-        tauri::async_runtime::handle().block_on(async move {
-            // Build an AuthorizationManager with our file-backed store, then
-            // load any saved token. initialize_from_store configures the client
-            // from the stored client_id/token and returns false if none exists.
-            let mut mgr = AuthorizationManager::new(&url)
-                .await
-                .map_err(|e| format!("auth setup failed: {e}"))?;
-            mgr.set_credential_store(FileCredentialStore::new(path));
-            let have_creds = mgr
-                .initialize_from_store()
-                .await
-                .map_err(|e| format!("credential load failed: {e}"))?;
-            if !have_creds {
-                return Err("not authenticated — use “Add a service” in Settings first".to_string());
-            }
-            // Metadata is needed for token refresh when the access token expires.
-            if let Err(e) = mgr.discover_metadata().await {
-                eprintln!(
-                    "[bit] mcp http {}: metadata discovery failed ({e}), refresh may fail",
-                    server.name
-                );
-            }
-
-            let transport = StreamableHttpClientTransport::with_client(
-                AuthClient::new(reqwest::Client::default(), mgr),
-                StreamableHttpClientTransportConfig::with_uri(url.clone()),
+        if let Err(e) = mgr.discover_metadata().await {
+            eprintln!(
+                "[bit] mcp http {}: metadata discovery failed ({e}), refresh may fail",
+                server.name
             );
-            let svc = ClientInfo::default()
-                .serve(transport)
-                .await
-                .map_err(|e| with_transport_hint(&url, &format!("connect failed: {e}")))?;
-            let tools = svc
-                .peer()
-                .list_all_tools()
-                .await
-                .map_err(|e| format!("tools/list failed: {e}"))?;
-            Ok(HttpConnection {
-                service: Arc::new(Mutex::new(Some(svc))),
-                tools: tools.iter().map(tool_to_value).collect(),
-            })
-        })
-    }
-
-    /// Call a server-side tool by name. Bridges to async; flattens the result
-    /// text the same way the stdio path does.
-    pub fn call(&mut self, tool: &str, args: &Value) -> Result<String, String> {
-        let service = self.service.clone();
-        let tool = tool.to_string();
-        let args = args.clone();
-        tauri::async_runtime::handle().block_on(async move {
-            let mut guard = service.lock().await;
-            let Some(svc) = guard.as_mut() else {
-                return Err("connection closed".to_string());
-            };
-            let result = svc
-                .peer()
-                .call_tool({
-                    let mut p = CallToolRequestParams::new(tool.clone());
-                    p.arguments = args.as_object().cloned();
-                    p
-                })
-                .await
-                .map_err(|e| format!("tool call failed: {e}"))?;
-            // CallToolResult serializes to MCP's content-block shape, so reuse
-            // the shared flattener via serde.
-            let v = serde_json::to_value(&result).map_err(|e| e.to_string())?;
-            Ok(flatten_mcp_content(&v))
-        })
-    }
+        }
+        let transport = StreamableHttpClientTransport::with_client(
+            AuthClient::new(reqwest::Client::default(), mgr),
+            StreamableHttpClientTransportConfig::with_uri(url.clone()),
+        );
+        let svc = ClientInfo::default()
+            .serve(transport)
+            .await
+            .map_err(|e| with_transport_hint(&url, &format!("connect failed: {e}")))?;
+        let tools = svc
+            .peer()
+            .list_all_tools()
+            .await
+            .map_err(|e| format!("tools/list failed: {e}"))?;
+        Ok(RmcpConnection::new(
+            svc,
+            tools.iter().map(tool_to_value).collect(),
+        ))
+    })
 }
 
 /// Run the interactive OAuth flow for a server and persist the resulting token.
@@ -237,27 +180,6 @@ pub fn run_oauth_flow(
         }
 
         Ok(url)
-    })
-}
-
-/// Convert an rmcp `Tool` into the same raw-Value shape the stdio path yields
-/// (so `tool_defs` can namespace both uniformly AND `is_destructive` can read
-/// annotations from either). MCP uses camelCase `inputSchema`/`destructiveHint`;
-/// we preserve that casing — callers normalize as needed.
-fn tool_to_value(tool: &rmcp::model::Tool) -> Value {
-    let annotations = tool.annotations.as_ref().map(|a| {
-        json!({
-            "readOnlyHint": a.read_only_hint,
-            "destructiveHint": a.destructive_hint,
-            "idempotentHint": a.idempotent_hint,
-            "openWorldHint": a.open_world_hint,
-        })
-    });
-    json!({
-        "name": tool.name.as_ref(),
-        "description": tool.description.as_ref().map(|c| c.as_ref()),
-        "inputSchema": tool.input_schema.as_ref(),
-        "annotations": annotations,
     })
 }
 

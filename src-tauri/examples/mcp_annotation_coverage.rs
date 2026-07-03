@@ -44,7 +44,7 @@ fn main() {
 
     let server = mcp::McpServer {
         name: name.clone(),
-        transport: "http".into(),
+        transport: mcp::Transport::Http,
         command: String::new(),
         args: Vec::new(),
         env: BTreeMap::new(),
@@ -54,7 +54,7 @@ fn main() {
         disabled_tools: Vec::new(),
     };
 
-    let conn = match mcp::http::HttpConnection::connect(&dir, &server) {
+    let conn = match mcp::http::connect(&dir, &server) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("connect failed: {e}");

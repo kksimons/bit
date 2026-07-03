@@ -17,6 +17,10 @@ void listen<{ kind: "yes" | "no"; times: number }>("bit-verdict", (e) => {
   bit.react(e.payload.kind, e.payload.times);
 });
 
+// Heartbeat while the agent works (each LLM turn + tool call). The Bit
+// alternates its thinking sway axis on each nudge so it reads as "busy".
+void listen("bit-step", () => bit.thinkingStep());
+
 // Backend reports what it transcribed (no agent yet — just surface it).
 void listen<string>("transcript", (e) => {
   if (e.payload) console.log("[bit] heard:", e.payload);

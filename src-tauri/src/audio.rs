@@ -51,7 +51,7 @@ impl Recorder {
                     return;
                 }
             };
-            sr.store(config.sample_rate().0, Ordering::Relaxed);
+            sr.store(config.sample_rate(), Ordering::Relaxed);
             let channels = config.channels() as usize;
             let fmt = config.sample_format();
             let stream_config: cpal::StreamConfig = config.into();
@@ -59,7 +59,7 @@ impl Recorder {
 
             let stream = match fmt {
                 cpal::SampleFormat::F32 => device.build_input_stream(
-                    &stream_config,
+                    stream_config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
                         if rec.load(Ordering::Relaxed) {
                             let mut b = buf.lock().unwrap();
@@ -72,7 +72,7 @@ impl Recorder {
                     None,
                 ),
                 cpal::SampleFormat::I16 => device.build_input_stream(
-                    &stream_config,
+                    stream_config,
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         if rec.load(Ordering::Relaxed) {
                             let mut b = buf.lock().unwrap();

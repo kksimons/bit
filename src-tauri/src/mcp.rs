@@ -1,45 +1,41 @@
-//! A small, synchronous stdio MCP (Model Context Protocol) client.
+//! MCP (Model Context Protocol) client for both local (stdio) and remote (http)
+//! servers, built on the rmcp SDK. Servers are configured Claude-Desktop-style
+//! (command + args + env) for stdio, or by URL + OAuth for http. Their tools are
+//! merged into the agent's toolset, namespaced `mcp__<server>__<tool>`.
 //!
-//! Servers are configured Claude-Desktop-style (command + args + env) and spawned
-//! as subprocesses; we speak newline-delimited JSON-RPC 2.0 over their stdio.
-//! Their tools are merged into the agent's toolset, namespaced `mcp__<server>__<tool>`,
-//! so the model can call them in the same tool-use loop as Bit's built-in tools.
-//!
-//! The protocol is deliberately minimal: initialize handshake, tools/list (cached),
-//! tools/call. All access to a connection is serialized behind a per-server Mutex so
-//! request→response is a simple blocking write-line/read-until-matching-id. Reads
-//! time out (a wedged server can't hang the agent thread forever), and a failing
-//! connection is dropped so the next call reconnects from scratch.
-//!
-//! HTTP (remote, OAuth) servers live in `mcp/http.rs` and use the rmcp SDK; the
-//! stdio client in this file handles only local subprocess servers.
+//! `RmcpConnection` (below) holds one live service for either transport; the
+//! `Registry` keeps one slot per server behind a Mutex so calls are serialized.
+//! The agent loop is synchronous, so async rmcp calls are bridged with
+//! `tauri::async_runtime::handle().block_on(...)` — safe because the agent runs
+//! on plain std::threads, not inside an async context. HTTP/OAuth wiring (the
+//! credential store, the browser/loopback flow) lives in `mcp/http.rs`.
 
 pub mod http;
 pub mod oauth;
 
+use rmcp::model::{CallToolRequestParams, ClientInfo, Tool as RmcpTool};
+use rmcp::service::{RoleClient, RunningService};
+use rmcp::transport::child_process::TokioChildProcess;
+use rmcp::ServiceExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use tauri::Manager;
+use tokio::sync::Mutex as AsyncMutex;
 
-/// MCP protocol version this client advertises on `initialize`.
-/// (Slack/Google remote servers reject older/missing versions; stdio servers
-/// built on the TS SDK honor whatever the client sends.)
-const PROTOCOL_VERSION: &str = "2025-06-18";
-
-/// How long to wait for a single JSON-RPC response before giving up and dropping
-/// the connection. Generous enough for slow IMAP round-trips, short enough that a
-/// wedged server can't hang the agent thread indefinitely.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Truncate tool results to keep large reads (a full inbox dump) out of the
-/// model's context window — mirrors tools.rs's MAX_OUTPUT for built-ins.
-const MAX_OUTPUT: usize = 4000;
+/// How an MCP server is reached: a local subprocess (stdio) or a remote
+/// Streamable-HTTP endpoint (http, via OAuth). Serialized lowercase so the
+/// config/UI keeps using "stdio"/"http" strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Transport {
+    #[default]
+    Stdio,
+    Http,
+}
 
 // ============================ model + storage ============================
 
@@ -53,9 +49,8 @@ const MAX_OUTPUT: usize = 4000;
 #[derive(Serialize, Deserialize, Clone)]
 pub struct McpServer {
     pub name: String,
-    /// "stdio" (default) or "http". Controls which client the registry uses.
-    #[serde(default = "default_transport")]
-    pub transport: String,
+    #[serde(default)]
+    pub transport: Transport,
     /// stdio only: the executable to spawn (e.g. "npx").
     #[serde(default)]
     pub command: String,
@@ -82,10 +77,6 @@ pub struct McpServer {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_transport() -> String {
-    "stdio".into()
 }
 
 fn store_path(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -152,203 +143,117 @@ pub fn delete(app: &tauri::AppHandle, name: &str) -> Result<(), String> {
 
 // ============================ connection ============================
 
-/// A live connection to one MCP server: the spawned child plus its cached
-/// `tools/list`. Guarded by a Mutex so calls are strictly serialized (one
-/// request/response on the wire at a time).
-struct Connection {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-    /// Monotonic JSON-RPC request id.
-    next_id: u64,
-    /// Cached tools from `tools/list` (the raw server objects).
+/// The concrete rmcp client service type held between calls (stdio or http).
+type ClientService = RunningService<RoleClient, ClientInfo>;
+
+/// One rmcp-backed MCP connection — used for BOTH stdio and http transports.
+/// Holds the live `RunningService` (so the session/auth/transport persist across
+/// calls) plus the cached tool list in the raw-Value shape `tool_defs` and
+/// `is_destructive` expect. The agent loop is sync, so async rmcp calls are
+/// bridged with `block_on`.
+pub struct RmcpConnection {
+    service: Arc<AsyncMutex<Option<ClientService>>>,
     tools: Vec<Value>,
 }
 
-impl Connection {
-    /// Spawn the server, run the initialize handshake, and cache tools/list.
-    fn connect(server: &McpServer) -> Result<Self, String> {
-        let mut cmd = std::process::Command::new(&server.command);
-        cmd.args(&server.args)
-            .envs(server.env.iter().map(|(k, v)| (k.clone(), v.clone())))
-            // Inherit PATH so `npx` resolves and can fetch packages.
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // Server logs go to stderr; we never parse it, so discard.
-            .stderr(Stdio::null());
-
-        let mut child = cmd.spawn().map_err(|e| {
-            format!(
-                "couldn't start '{}' (is it installed?): {e}",
-                server.command
-            )
-        })?;
-        let stdin = child.stdin.take().ok_or("no stdin")?;
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        let mut conn = Connection {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-            next_id: 1,
-            tools: Vec::new(),
-        };
-
-        // 1. initialize — server echoes capabilities + (usually) the protocol version.
-        let init = conn.request(
-            "initialize",
-            json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "bit", "version": env!("CARGO_PKG_VERSION") },
-            }),
-        )?;
-        let _ = init; // capabilities acknowledged; version negotiation is lenient here.
-
-        // 2. notifications/initialized — required by the spec to leave the handshake.
-        conn.notify("notifications/initialized", json!({}))?;
-
-        // 3. tools/list — cache for advertising to the model.
-        let tools_resp = conn.request("tools/list", json!({}))?;
-        conn.tools = tools_resp
-            .get("tools")
-            .and_then(|t| t.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        Ok(conn)
+impl RmcpConnection {
+    /// Construct from a live service + its tool list (shared by stdio and http).
+    pub(crate) fn new(svc: ClientService, tools: Vec<Value>) -> Self {
+        Self {
+            service: Arc::new(AsyncMutex::new(Some(svc))),
+            tools,
+        }
     }
 
-    /// Send a request and read until we see its matching response id, skipping
-    /// notifications/log lines servers may emit between them. Times out after
-    /// READ_TIMEOUT so a wedged server can't hang the agent loop.
-    fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let line = serde_json::to_string(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params,
-        }))
-        .map_err(|e| e.to_string())?;
-        self.stdin
-            .write_all(line.as_bytes())
-            .and_then(|_| self.stdin.write_all(b"\n"))
-            .map_err(|e| format!("write failed: {e}"))?;
-        self.stdin
-            .flush()
-            .map_err(|e| format!("flush failed: {e}"))?;
-
-        self.read_until_id(id)
+    /// Cached tools/list (raw serde Values; namespaced later by `tool_defs`).
+    pub fn tools(&self) -> &[Value] {
+        &self.tools
     }
 
-    fn notify(&mut self, method: &str, params: Value) -> Result<(), String> {
-        let line = serde_json::to_string(&json!({
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        }))
-        .map_err(|e| e.to_string())?;
-        self.stdin
-            .write_all(line.as_bytes())
-            .and_then(|_| self.stdin.write_all(b"\n"))
-            .map_err(|e| format!("write failed: {e}"))?;
-        self.stdin.flush().map_err(|e| format!("flush failed: {e}"))
+    /// Stdio: spawn the server subprocess, run the initialize handshake + tools/list.
+    pub fn connect_stdio(server: &McpServer) -> Result<Self, String> {
+        // Clone the config so we can move it into the async block; the tokio
+        // child-process spawn must run inside the runtime (block_on).
+        let command = server.command.clone();
+        let args = server.args.clone();
+        let env = server.env.clone();
+        tauri::async_runtime::handle().block_on(async move {
+            let mut cmd = tokio::process::Command::new(&command);
+            // Inherit the parent env (so PATH resolves `npx`), then layer the
+            // server's configured env (credentials) on top.
+            cmd.args(&args)
+                .envs(env.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let (transport, _stderr) = TokioChildProcess::builder(cmd)
+                .stderr(Stdio::null()) // server stderr is never parsed; discard it
+                .spawn()
+                .map_err(|e| format!("couldn't start '{command}' (is it installed?): {e}"))?;
+            let svc = ClientInfo::default()
+                .serve(transport)
+                .await
+                .map_err(|e| format!("MCP handshake failed: {e}"))?;
+            let tools = svc
+                .peer()
+                .list_all_tools()
+                .await
+                .map_err(|e| format!("tools/list failed: {e}"))?;
+            Ok(Self::new(svc, tools.iter().map(tool_to_value).collect()))
+        })
     }
 
-    /// Read stdout lines until we find a JSON-RPC response whose `id` matches.
-    /// Non-JSON lines (some servers print banners to stdout despite the spec)
-    /// and notifications (no `id`) are skipped. Returns Err on timeout or a
-    /// server-reported JSON-RPC error.
-    fn read_until_id(&mut self, want_id: u64) -> Result<Value, String> {
-        let deadline = std::time::Instant::now() + READ_TIMEOUT;
-        let mut buf = String::new();
-        loop {
-            if std::time::Instant::now() > deadline {
-                return Err(format!(
-                    "timed out after {}s waiting for response to request {want_id}",
-                    READ_TIMEOUT.as_secs()
-                ));
-            }
-            buf.clear();
-            let n = self
-                .stdout
-                .read_line(&mut buf)
-                .map_err(|e| format!("read failed: {e}"))?;
-            if n == 0 {
-                return Err("server closed stdout".into());
-            }
-            let trimmed = buf.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let msg: Value = match serde_json::from_str(trimmed) {
-                Ok(v) => v,
-                Err(_) => continue, // a non-JSON banner line; skip it
+    /// Call a server-side tool by name. Bridges to async; flattens the result
+    /// text the same way for both transports.
+    pub fn call(&mut self, tool: &str, args: &Value) -> Result<String, String> {
+        let service = self.service.clone();
+        let tool = tool.to_string();
+        let args = args.clone();
+        tauri::async_runtime::handle().block_on(async move {
+            let mut guard = service.lock().await;
+            let Some(svc) = guard.as_mut() else {
+                return Err("connection closed".to_string());
             };
-            // Notifications have no id; ignore them while waiting for our reply.
-            let Some(id) = msg.get("id") else { continue };
-            if id.as_u64() != Some(want_id) {
-                continue;
-            }
-            if let Some(err) = msg.get("error") {
-                return Err(format!(
-                    "server error: {}",
-                    err.get("message")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("(unknown)")
-                ));
-            }
-            return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
-        }
+            let result = svc
+                .peer()
+                .call_tool({
+                    let mut p = CallToolRequestParams::new(tool.clone());
+                    p.arguments = args.as_object().cloned();
+                    p
+                })
+                .await
+                .map_err(|e| format!("tool call failed: {e}"))?;
+            // CallToolResult serializes to MCP's content-block shape; reuse the
+            // shared flattener via serde.
+            let v = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+            Ok(flatten_mcp_content(&v))
+        })
     }
 }
 
-impl Drop for Connection {
-    fn drop(&mut self) {
-        // Best-effort shutdown: kill the child so we never leak a subprocess.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl Connection {
-    /// Call a server-side tool by name. Returns the flattened text content.
-    fn call_tool(&mut self, tool: &str, args: &Value) -> Result<String, String> {
-        let result = self.request("tools/call", json!({ "name": tool, "arguments": args }))?;
-        Ok(flatten_mcp_content(&result))
-    }
-}
-
-/// A live connection regardless of transport. Both transports cache their
-/// `tools/list` as the same raw serde Values, so the registry and `tool_defs`
-/// never need to know which is which. Only `call` differs.
-enum AnyConn {
-    Stdio(Connection),
-    Http(crate::mcp::http::HttpConnection),
-}
-
-impl AnyConn {
-    fn tools(&self) -> &[Value] {
-        match self {
-            AnyConn::Stdio(c) => &c.tools,
-            AnyConn::Http(c) => c.tools(),
-        }
-    }
-
-    fn call(&mut self, tool: &str, args: &Value) -> Result<String, String> {
-        match self {
-            AnyConn::Stdio(c) => c.call_tool(tool, args),
-            AnyConn::Http(c) => c.call(tool, args),
-        }
-    }
+/// Convert an rmcp `Tool` into the raw-Value shape the rest of this module
+/// expects (matching what a stdio server's tools/list yields), so `tool_defs`
+/// can namespace both uniformly AND `is_destructive` can read annotations from
+/// either. MCP uses camelCase `inputSchema`/`destructiveHint`; preserved as-is.
+pub(crate) fn tool_to_value(tool: &RmcpTool) -> Value {
+    let annotations = tool.annotations.as_ref().map(|a| {
+        json!({
+            "readOnlyHint": a.read_only_hint,
+            "destructiveHint": a.destructive_hint,
+            "idempotentHint": a.idempotent_hint,
+            "openWorldHint": a.open_world_hint,
+        })
+    });
+    json!({
+        "name": tool.name.as_ref(),
+        "description": tool.description.as_ref().map(|c| c.as_ref()),
+        "inputSchema": tool.input_schema.as_ref(),
+        "annotations": annotations,
+    })
 }
 
 /// Entry in the global registry: either a live connection or the last error
 /// that prevented establishing one (so the UI can show "error: …" and the agent
 /// gets a clean Err rather than a silent reconnect on every call).
 enum Slot {
-    Connected(AnyConn),
+    Connected(RmcpConnection),
     /// Cached error from the last failed connect; cleared on next retry.
     Error(String),
 }
@@ -387,17 +292,17 @@ impl Registry {
 
     /// Establish a fresh connection to `server`, picking the transport by
     /// `server.transport`. Stdio spawns the subprocess; http loads stored OAuth
-    /// credentials and connects via rmcp.
-    fn connect(app: &tauri::AppHandle, server: &McpServer) -> Result<AnyConn, String> {
-        match server.transport.as_str() {
-            "http" => {
+    /// credentials and connects. Both yield the same `RmcpConnection`.
+    fn connect(app: &tauri::AppHandle, server: &McpServer) -> Result<RmcpConnection, String> {
+        match server.transport {
+            Transport::Stdio => RmcpConnection::connect_stdio(server),
+            Transport::Http => {
                 let dir = app
                     .path()
                     .app_config_dir()
                     .map_err(|e| format!("no config dir: {e}"))?;
-                crate::mcp::http::HttpConnection::connect(&dir, server).map(AnyConn::Http)
+                crate::mcp::http::connect(&dir, server)
             }
-            _ => Connection::connect(server).map(AnyConn::Stdio),
         }
     }
 
@@ -508,7 +413,7 @@ impl Registry {
 /// Pull readable text out of an MCP `tools/call` result, which is a list of
 /// content blocks (`{type:"text", text:"…"}`, etc.). Flatten all text blocks,
 /// separated by newlines; cap the total to keep the model context bounded.
-pub fn flatten_mcp_content(result: &Value) -> String {
+pub(crate) fn flatten_mcp_content(result: &Value) -> String {
     let mut out = String::new();
     if let Some(arr) = result.get("content").and_then(|c| c.as_array()) {
         for block in arr {
@@ -525,8 +430,16 @@ pub fn flatten_mcp_content(result: &Value) -> String {
     if out.trim().is_empty() {
         out = serde_json::to_string(result).unwrap_or_else(|_| "(empty result)".into());
     }
-    if out.len() > MAX_OUTPUT {
-        out.truncate(MAX_OUTPUT);
+    if out.len() > crate::MAX_OUTPUT {
+        // Truncate on a UTF-8 char boundary (plain `truncate` panics mid-char,
+        // e.g. on emoji/CJK in MCP results at the cut point).
+        let cut = out
+            .char_indices()
+            .take_while(|(i, _)| *i <= crate::MAX_OUTPUT)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(crate::MAX_OUTPUT);
+        out.truncate(cut);
         out.push_str("\n…[truncated]");
     }
     out
@@ -606,13 +519,11 @@ pub fn is_destructive(tool: &Value) -> bool {
     let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let ann = tool.get("annotations");
     // Spec: readOnlyHint=true means no side effects at all — never destructive.
-    if let Some(read_only) = ann
+    if let Some(true) = ann
         .and_then(|a| a.get("readOnlyHint"))
         .and_then(|v| v.as_bool())
     {
-        if read_only {
-            return false;
-        }
+        return false;
     }
     // Explicit destructiveHint from the server: trust it either way.
     if let Some(destructive) = ann
@@ -623,15 +534,15 @@ pub fn is_destructive(tool: &Value) -> bool {
     }
     // No usable annotation — fall back to the name heuristic.
     let lower = name.to_lowercase();
-    let after_prefix = DESTRUCTIVE_PREFIXES
-        .iter()
-        .find_map(|p| lower.strip_prefix(p))
-        .map(|rest| rest.is_empty() || !rest.chars().next().unwrap_or(' ').is_alphanumeric());
-    after_prefix.unwrap_or(false)
+    DESTRUCTIVE_PREFIXES.iter().any(|p| {
+        lower
+            .strip_prefix(p)
+            .is_some_and(|rest| rest.is_empty() || !rest.starts_with(|c: char| c.is_alphanumeric()))
+    })
 }
 
 /// `mcp__<server>__<tool>` — the form we advertise and that the model calls.
-pub fn namespaced(server: &str, tool: &str) -> String {
+pub(crate) fn namespaced(server: &str, tool: &str) -> String {
     format!("mcp__{server}__{tool}")
 }
 /// Split a namespaced tool name back into (server, tool).
@@ -801,11 +712,11 @@ mod tests {
 
     #[test]
     fn flatten_truncates_large_output() {
-        let big = "x".repeat(MAX_OUTPUT * 2);
+        let big = "x".repeat(crate::MAX_OUTPUT * 2);
         let v = json!({ "content": [{ "type": "text", "text": big }] });
         let out = flatten_mcp_content(&v);
         assert!(out.ends_with("…[truncated]"));
-        assert!(out.len() < MAX_OUTPUT + 64);
+        assert!(out.len() < crate::MAX_OUTPUT + 64);
     }
 
     #[test]
@@ -884,7 +795,7 @@ mod tests {
         }
         let server = McpServer {
             name: "gmail".into(),
-            transport: "stdio".into(),
+            transport: Transport::Stdio,
             command: "npx".into(),
             args: vec!["-y".into(), "gmail-mcp-imap".into()],
             env: [
@@ -903,7 +814,7 @@ mod tests {
         };
         // Exercise the stdio client directly (no AppHandle needed in a unit
         // test): spawn → initialize → tools/list.
-        let conn = Connection::connect(&server).expect("handshake should succeed");
+        let conn = RmcpConnection::connect_stdio(&server).expect("handshake should succeed");
         let names: Vec<&str> = conn
             .tools
             .iter()
@@ -922,5 +833,78 @@ mod tests {
             "expected many tools, got {}: {names:?}",
             names.len()
         );
+    }
+
+    /// End-to-end characterization of the stdio MCP client against a local echo
+    /// server fixture. This is the safety net for any rewrite of the hand-rolled
+    /// client (e.g. onto rmcp): spawn → initialize → tools/list → tools/call,
+    /// banner skipping, and destructive detection on the listed tools. Runs when
+    /// `bun` or `node` is available; skips gracefully otherwise.
+    #[test]
+    fn stdio_client_end_to_end() {
+        let mut runner = None;
+        for c in ["bun", "node"] {
+            if std::process::Command::new(c)
+                .arg("--version")
+                .output()
+                .is_ok()
+            {
+                runner = Some(c);
+                break;
+            }
+        }
+        let Some(runner) = runner else {
+            eprintln!("[test] bun/node not found; skipping stdio end-to-end");
+            return;
+        };
+        let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/echo-mcp.mjs");
+        let server = McpServer {
+            name: "echo".into(),
+            transport: Transport::Stdio,
+            command: runner.into(),
+            args: vec![fixture.into()],
+            env: BTreeMap::new(),
+            url: String::new(),
+            enabled: true,
+            preset: String::new(),
+            disabled_tools: Vec::new(),
+        };
+        let mut conn =
+            RmcpConnection::connect_stdio(&server).expect("stdio connect should succeed");
+
+        // tools/list returned both tools, and the non-JSON startup banner was
+        // skipped (otherwise we'd see 3 tools or fail to parse).
+        let names: Vec<&str> = conn
+            .tools
+            .iter()
+            .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(names, ["echo", "delete_thing"], "got: {names:?}");
+
+        // Destructive detection flows through the raw tool defs the server sent:
+        // "echo" is safe; "delete_thing" is flagged by the name heuristic.
+        let tool = |n: &str| {
+            conn.tools
+                .iter()
+                .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(n))
+                .unwrap()
+        };
+        assert!(
+            !is_destructive(tool("echo")),
+            "echo should not be destructive"
+        );
+        assert!(
+            is_destructive(tool("delete_thing")),
+            "delete_thing should be destructive"
+        );
+
+        // Namespacing is the form the agent sees + calls.
+        assert_eq!(namespaced("echo", "echo"), "mcp__echo__echo");
+
+        // tools/call returns the flattened text content.
+        let out = conn
+            .call("echo", &json!({ "text": "hello world" }))
+            .expect("tools/call should succeed");
+        assert!(out.contains("hello world"), "got: {out}");
     }
 }

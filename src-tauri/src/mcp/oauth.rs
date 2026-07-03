@@ -37,8 +37,10 @@ impl FileCredentialStore {
 
     /// Build the store path for a given server name, under the app config dir.
     pub fn path_for(app: &tauri::AppHandle, server_name: &str) -> Option<PathBuf> {
-        let dir = app.path().app_config_dir().ok()?.join("mcp");
-        Some(dir.join(format!("{}.token.json", sanitize_name(server_name))))
+        Some(path_for_dir(
+            &app.path().app_config_dir().ok()?,
+            server_name,
+        ))
     }
 
     /// Ensure the parent dir exists (called before writes).
@@ -49,6 +51,15 @@ impl FileCredentialStore {
         }
         Ok(())
     }
+}
+
+/// The token-store path for `server_name` under `config_dir`. Shared by
+/// `FileCredentialStore::path_for` and the http transport's `token_path` so
+/// there's one definition of where tokens live.
+pub fn path_for_dir(config_dir: &std::path::Path, server_name: &str) -> PathBuf {
+    config_dir
+        .join("mcp")
+        .join(format!("{}.token.json", sanitize_name(server_name)))
 }
 
 /// Atomic write: serialize to a temp file in the same directory, fsync, then

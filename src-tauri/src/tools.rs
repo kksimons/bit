@@ -3,8 +3,6 @@ use serde_json::{json, Value};
 use std::process::Command;
 use tauri::Manager;
 
-const MAX_OUTPUT: usize = 4000;
-
 /// Tools the model may call. By default the model gets only SAFE, bounded tools
 /// (run your enabled workflows + open apps/URLs + Focus + move). Raw execution
 /// (shell, AppleScript, ad-hoc terminal tabs) is added only in Developer mode.
@@ -54,6 +52,26 @@ pub fn definitions(developer_mode: bool) -> Value {
                 "required": ["name", "steps"]
             }
         }),
+        json!({
+            "name": "recall_history",
+            "description": "Search your own memory of past actions and notes. Use whenever the user refers to something done before (e.g. 'it', 'that card', 'the one I just made', 'what did I just do') or when you need to recover context like a card number from a previous command. Returns timestamped activity and lessons.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "Optional keyword to filter (e.g. a title, 'MAG Solar', 'email')." },
+                    "limit": { "type": "number", "description": "Max entries to return (default 10, max 50)." }
+                }
+            }
+        }),
+        json!({
+            "name": "remember",
+            "description": "Save a concise one-line lesson or note to long-term memory for future recall. Use after a failure or when you learn something durable about the user's setup (e.g. which columns a board has, how a service is named). Keep it short and general.",
+            "input_schema": {
+                "type": "object",
+                "properties": { "note": { "type": "string" } },
+                "required": ["note"]
+            }
+        }),
     ];
 
     if developer_mode {
@@ -85,10 +103,6 @@ pub fn definitions(developer_mode: bool) -> Value {
     Value::Array(tools)
 }
 
-fn developer_mode(app: &tauri::AppHandle) -> bool {
-    crate::config::load_settings(app).developer_mode
-}
-
 /// Execute a tool call and return text output (or an error string).
 pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<String, String> {
     // MCP tools are namespaced mcp__<server>__<tool> and routed to the client.
@@ -100,7 +114,7 @@ pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<Stri
 
     // Raw-execution tools are only available in Developer mode.
     if matches!(name, "run_shell" | "run_applescript" | "open_terminal_tabs")
-        && !developer_mode(app)
+        && !crate::config::load_settings(app).developer_mode
     {
         return Err(format!(
             "'{name}' is disabled. Bit only runs your saved workflows and safe actions. \
@@ -167,6 +181,15 @@ pub fn execute(app: &tauri::AppHandle, name: &str, input: &Value) -> Result<Stri
                 "Saved '{name}' as a disabled draft. The user must review and enable it in Settings before it can run."
             ))
         }
+        "recall_history" => {
+            let query = arg("query");
+            let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+            Ok(crate::memory::recall(app, query.as_deref(), limit))
+        }
+        "remember" => {
+            let note = arg("note").ok_or("missing note")?;
+            crate::memory::remember(app, &note)
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }
@@ -186,27 +209,24 @@ pub fn run_shell(command: &str) -> Result<String, String> {
 /// Hard backstop denylist for the genuinely catastrophic — applies even to your
 /// own workflows and Developer mode. Conservative: targets irreversible/system
 /// damage, not ordinary `rm -rf ./node_modules`.
+const CATASTROPHIC: [(&str, &str); 12] = [
+    ("rm -rf /", "rm -rf / (root)"),
+    ("rm -rf /*", "rm -rf /*"),
+    ("rm -fr /", "rm -fr /"),
+    ("rm -rf ~", "rm -rf home"),
+    ("rm -rf $home", "rm -rf $HOME"),
+    ("sudo ", "sudo (privilege escalation)"),
+    ("mkfs", "mkfs (format)"),
+    ("diskutil erase", "diskutil erase"),
+    ("of=/dev/", "dd to a device"),
+    (":(){:|:&};:", "fork bomb"),
+    ("| sh", "pipe-to-shell"),
+    ("| bash", "pipe-to-shell"),
+];
+
 fn is_catastrophic(cmd: &str) -> Option<&'static str> {
-    let c = cmd.to_lowercase();
-    let c = c.replace(['"', '\''], ""); // ignore quoting around targets
-    let patterns: [(&str, &str); 11] = [
-        ("rm -rf /", "rm -rf / (root)"),
-        ("rm -rf /*", "rm -rf /*"),
-        ("rm -fr /", "rm -fr /"),
-        ("rm -rf ~", "rm -rf home"),
-        ("rm -rf $home", "rm -rf $HOME"),
-        ("sudo ", "sudo (privilege escalation)"),
-        ("mkfs", "mkfs (format)"),
-        ("diskutil erase", "diskutil erase"),
-        ("of=/dev/", "dd to a device"),
-        (":(){:|:&};:", "fork bomb"),
-        ("| sh", "pipe-to-shell"),
-    ];
-    // also catch `curl|wget ... | bash`
-    if (c.contains("curl") || c.contains("wget")) && (c.contains("| sh") || c.contains("| bash")) {
-        return Some("remote-pipe-to-shell");
-    }
-    patterns
+    let c = cmd.to_lowercase().replace(['"', '\''], ""); // ignore quoting around targets
+    CATASTROPHIC
         .iter()
         .find(|(p, _)| c.contains(p))
         .map(|(_, label)| *label)
@@ -257,8 +277,15 @@ fn capture(cmd: &mut Command) -> Result<String, String> {
         // Surface failures as errors so the agent answers honestly.
         return Err(s);
     }
-    if s.len() > MAX_OUTPUT {
-        s.truncate(MAX_OUTPUT);
+    if s.len() > crate::MAX_OUTPUT {
+        // Truncate on a UTF-8 char boundary (plain `truncate` panics mid-char).
+        let cut = s
+            .char_indices()
+            .take_while(|(i, _)| *i <= crate::MAX_OUTPUT)
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(crate::MAX_OUTPUT);
+        s.truncate(cut);
         s.push_str("\n…[truncated]");
     }
     if s.trim().is_empty() {

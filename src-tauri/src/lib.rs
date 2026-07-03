@@ -2,6 +2,7 @@ mod agent;
 mod audio;
 mod config;
 pub mod mcp;
+mod memory;
 mod motion;
 mod stt;
 mod tools;
@@ -207,7 +208,7 @@ fn end_drag(app: tauri::AppHandle) {
 #[derive(serde::Serialize)]
 struct McpServerView {
     name: String,
-    transport: String,
+    transport: mcp::Transport,
     command: String,
     args: Vec<String>,
     env: std::collections::BTreeMap<String, String>,
@@ -235,7 +236,7 @@ fn get_mcp_servers(app: tauri::AppHandle) -> Vec<McpServerView> {
                 connected,
                 error: registry.last_error(&s.name),
                 name: s.name.clone(),
-                transport: s.transport.clone(),
+                transport: s.transport,
                 command: s.command,
                 args: s.args,
                 env: s.env,
@@ -287,7 +288,7 @@ fn add_http_server(app: tauri::AppHandle, name: String, url: String) -> Result<S
     let resolved_url = mcp::http::run_oauth_flow(&dir, &name, &url)?;
     let server = mcp::McpServer {
         name,
-        transport: "http".into(),
+        transport: mcp::Transport::Http,
         command: String::new(),
         args: Vec::new(),
         env: std::collections::BTreeMap::new(),
@@ -478,6 +479,21 @@ fn spawn_mcp_prewarm(app: tauri::AppHandle) {
     });
 }
 
+/// Pre-load the speech-to-text model in the background right after launch, so
+/// the first voice command doesn't pay the model-load cost (which otherwise
+/// lands on the critical path between stop-listening and the verdict). Cheap:
+/// the model is resident anyway after first use; this just front-loads it.
+/// Failures are non-fatal — `ensure_loaded` is retried on the next command.
+fn spawn_stt_prewarm(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let stt = app.state::<AppState>().stt.clone();
+        let active_model = config::load_settings(&app).stt_model;
+        if let Err(e) = stt.ensure_loaded(&active_model) {
+            eprintln!("[bit] stt pre-warm deferred (will retry on first use): {e}");
+        }
+    });
+}
+
 // ---- Launch on startup ----
 //
 // We wrap the autostart plugin in our own commands rather than letting the
@@ -515,21 +531,51 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     }
 }
 
+/// Maximum chars of tool output we keep (in memory + shown to the model).
+pub(crate) const MAX_OUTPUT: usize = 4000;
+
+/// The bit overlay window, if it exists yet. Centralizes the lookup the emit
+/// helpers and drag handlers all need, and makes "no window yet" one guard.
+fn bit_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    app.get_webview_window("bit")
+}
+
 /// Tell the Bit overlay to change form/state.
 fn set_bit_state(app: &tauri::AppHandle, state: &str) {
-    if let Some(win) = app.get_webview_window("bit") {
+    if let Some(win) = bit_window(app) {
         let _ = win.emit("bit-state", state);
     }
 }
 
 /// Emit the final yes/no verdict and how many times to say it (1..=3).
 fn emit_verdict(app: &tauri::AppHandle, yes: bool, times: u8) {
-    if let Some(win) = app.get_webview_window("bit") {
+    if let Some(win) = bit_window(app) {
         let _ = win.emit(
             "bit-verdict",
             serde_json::json!({ "kind": if yes { "yes" } else { "no" }, "times": times }),
         );
     }
+}
+
+/// A heartbeat while the agent works: each LLM turn and each tool call nudges
+/// this so the Bit's "thinking" animation can advance (e.g. alternate its sway
+/// axis). Without it the Bit is motionless for the whole processing gap.
+pub fn nudge_thinking(app: &tauri::AppHandle) {
+    if let Some(win) = bit_window(app) {
+        let _ = win.emit("bit-step", ());
+    }
+}
+
+/// Reveal the memory files (activity.jsonl + context.md) in Finder, so the user
+/// can read, grep, or hand-edit Bit's history/notes.
+#[tauri::command]
+fn open_memory_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = memory::folder(&app)?;
+    std::process::Command::new("open")
+        .arg(&dir)
+        .status()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Open (or focus) the settings window. On macOS we temporarily switch to a
@@ -725,12 +771,25 @@ fn finish_recording(app: &tauri::AppHandle) {
                     "[bit] worker: calling agent (provider={}, model={})…",
                     cfg.provider, cfg.model
                 );
+                let ask_t0 = Instant::now();
                 match agent::ask(&app, &cfg, &text) {
-                    Ok((yes, times)) => {
+                    Ok((yes, times, n_tools)) => {
+                        let ms = ask_t0.elapsed().as_millis();
+                        memory::log_ask(
+                            &app,
+                            &text,
+                            if yes { "yes" } else { "no" },
+                            times,
+                            n_tools,
+                            ms,
+                            None,
+                        );
                         println!("[bit] → {} x{times}", if yes { "yes" } else { "no" });
                         emit_verdict(&app, yes, times);
                     }
                     Err(e) => {
+                        let ms = ask_t0.elapsed().as_millis();
+                        memory::log_ask(&app, &text, "no", 1, 0, ms, Some(&e));
                         eprintln!("[bit] agent error: {e}");
                         emit_verdict(&app, false, 1);
                     }
@@ -743,7 +802,6 @@ fn finish_recording(app: &tauri::AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -802,6 +860,10 @@ pub fn run() {
             // request doesn't stall on npx cold-start. Failures are non-fatal —
             // the server just contributes no tools until it connects.
             spawn_mcp_prewarm(app.handle().clone());
+
+            // Pre-load the STT model in the background so the first voice command
+            // doesn't pay the model-load cost on the critical path. Same idea.
+            spawn_stt_prewarm(app.handle().clone());
 
             // Defense-in-depth: verify the Registry is reachable via the
             // standalone `app.state::<Registry>()` path that mcp.rs/agent.rs
@@ -888,7 +950,8 @@ pub fn run() {
             delete_stt_model,
             get_mcp_presets,
             autostart_state,
-            set_autostart
+            set_autostart,
+            open_memory_folder
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

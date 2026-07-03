@@ -67,16 +67,20 @@ const PROVIDER_DEFAULTS: Record<string, { base_url: string; model: string; label
   },
 };
 
+function applyProvider(label: string, hasKey?: boolean) {
+  elInput("api_key").value = "";
+  elInput("api_key").placeholder = hasKey
+    ? "•••••••• saved — leave blank to keep"
+    : `paste your ${label} key`;
+}
+
 async function loadSettings() {
   const s = await invoke<SettingsView>("get_settings");
   elSel("provider").value = s.provider;
   elInput("base_url").value = s.base_url;
   elInput("model").value = s.model;
-  elInput("api_key").value = "";
   const label = PROVIDER_DEFAULTS[s.provider]?.label ?? "provider";
-  elInput("api_key").placeholder = s.has_key
-    ? "•••••••• saved — leave blank to keep"
-    : `paste your ${label} key`;
+  applyProvider(label, s.has_key);
   elInput("dev_mode").checked = s.developer_mode;
   elInput("size").value = String(s.size);
   $("size_val").textContent = `${s.size.toFixed(2)}×`;
@@ -90,8 +94,7 @@ elSel("provider").addEventListener("change", () => {
   if (d) {
     elInput("base_url").value = d.base_url;
     elInput("model").value = d.model;
-    elInput("api_key").value = "";
-    elInput("api_key").placeholder = `paste your ${d.label} key`;
+    applyProvider(d.label);
     $("status").textContent = `Switched to ${d.label} — enter that provider's key and Save.`;
   }
 });
@@ -180,6 +183,11 @@ $("dnd_setup").addEventListener("click", async () => {
   await invoke("setup_dnd").catch(() => {});
 });
 $("dnd_recheck").addEventListener("click", refreshDnd);
+
+// ================= Memory: reveal activity.jsonl + context.md in Finder =================
+$("open_memory").addEventListener("click", () => {
+  void invoke("open_memory_folder").catch((e) => console.error(e));
+});
 
 // ================= Workflows list =================
 async function loadWorkflows() {
@@ -783,19 +791,19 @@ async function persistTools() {
 }
 
 $("mcp_tools_close").addEventListener("click", closeToolsEditor);
-$("mcp_tools_disable_dest")?.addEventListener("click", async () => {
+$("mcp_tools_disable_dest").addEventListener("click", async () => {
   for (const t of toolsList) if (t.destructive) t.enabled = false;
   renderToolsList();
   await persistTools();
 });
-$("mcp_tools_enable_all")?.addEventListener("click", async () => {
+$("mcp_tools_enable_all").addEventListener("click", async () => {
   for (const t of toolsList) t.enabled = true;
   renderToolsList();
   await persistTools();
 });
 
 // Advanced: custom stdio server. Split the args + env text fields into arrays/map.
-$("mcp_custom_add")?.addEventListener("click", async () => {
+$("mcp_custom_add").addEventListener("click", async () => {
   const name = elInput("mcp_custom_name").value.trim();
   const command = elInput("mcp_custom_command").value.trim();
   const argsText = elInput("mcp_custom_args").value.trim();

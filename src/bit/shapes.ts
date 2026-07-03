@@ -23,7 +23,7 @@ function pseudoRandom(n: THREE.Vector3): number {
   return s - Math.floor(s);
 }
 
-const keyOf = (v: THREE.Vector3) => `${v.x.toFixed(3)},${v.y.toFixed(3)},${v.z.toFixed(3)}`;
+const keyOf = (v: THREE.Vector3) => `${v.x.toFixed(2)},${v.y.toFixed(2)},${v.z.toFixed(2)}`;
 
 /**
  * Stellate a convex polyhedron: replace each (coplanar) face with a pyramid

@@ -65,6 +65,11 @@ export class Bit {
     amplitude: 0,
     speed: 1,
   };
+  /// Thinking sway: while processing, the Bit gently drifts, alternating the
+  /// drift axis (x side-to-side ↔ y up-and-down) on each backend "step" nudge,
+  /// so the user can see it's working through the latency instead of freezing.
+  private thinkAxis: 0 | 1 = 0;
+  private thinkStepAt = 0;
   private sounds: Record<"yes" | "no", HTMLAudioElement> = {
     yes: new Audio("/sounds/bit-yes.mp3"),
     no: new Audio("/sounds/bit-no.mp3"),
@@ -101,9 +106,6 @@ export class Bit {
     });
     this.mesh = new THREE.Mesh(buildGeometry("neutral"), this.material);
     this.scene.add(this.mesh);
-
-    this.sounds.yes.preload = "auto";
-    this.sounds.no.preload = "auto";
 
     this.applyPalette();
     this.resize();
@@ -144,10 +146,6 @@ export class Bit {
     };
   }
 
-  getState(): BitState {
-    return this.state;
-  }
-
   /** Say yes/no `times` (1–3) in quick succession — Bit's bit of personality. */
   react(kind: "yes" | "no", times: number) {
     const n = Math.max(1, Math.min(3, Math.round(times)));
@@ -157,6 +155,17 @@ export class Bit {
       const last = i === n - 1;
       window.setTimeout(() => this.setState(kind, last ? 1400 : 0), i * interval);
     }
+  }
+
+  /**
+   * A backend heartbeat (one per LLM turn / tool call) while the agent works.
+   * Each call flips the thinking-sway axis (x ↔ y) and re-phases it, so the
+   * motion visibly changes direction as work progresses — a gentle "looking
+   * around while thinking" instead of a frozen glow.
+   */
+  thinkingStep() {
+    this.thinkAxis = this.thinkAxis === 0 ? 1 : 0;
+    this.thinkStepAt = this.clock.elapsedTime;
   }
 
   private swapTo(state: BitState) {
@@ -182,9 +191,10 @@ export class Bit {
   }
 
   /// Advance the personality bounce by `dt` and return its current y offset.
-  /// Shape: one quick hop in the answer’s direction, then settle back — an
-  /// ease-out curve (fast out, slow back) that reads as a lively “yes!” or a
-  /// deflated “no”. Returns 0 when no bounce is active.
+  /// Shape: a single symmetric sin hop in the answer’s direction — it peaks
+  /// at the midpoint (p=0.5) and returns to 0 at both ends (start and settle),
+  /// reading as a lively “yes!” or a deflated “no”. Returns 0 when no bounce
+  /// is active.
   private bounceOffset(dt: number): number {
     if (!this.bounce.active) return 0;
     this.bounce.t += dt * this.bounce.speed;
@@ -193,8 +203,8 @@ export class Bit {
       this.bounce.active = false;
       return 0;
     }
-    // sin(πp) peaks at the midpoint and returns to 0 at both ends — a single
-    // smooth hop. Damped slightly so the second half (settle) is gentler.
+    // sin(πp): a single symmetric hop — peak at the midpoint (p=0.5), back to
+    // 0 at p=0 and p=1.
     const hop = Math.sin(p * Math.PI);
     return this.bounce.direction * this.bounce.amplitude * hop;
   }
@@ -225,9 +235,19 @@ export class Bit {
       // ease z back to 0 so the wobble doesn't linger after a no.
       this.mesh.rotation.z *= 0.85;
     }
-    // Resting hover-bob is the base; the personality bounce adds on top of it
-    // (so yes bobs up from the hover, no dips below it).
-    this.mesh.position.y = Math.sin(t * 1.5) * 0.12 + this.bounceOffset(dt);
+    // Resting hover-bob is the base; the personality bounce and the thinking
+    // sway add on top of it (so yes bobs up from the hover, no dips below it).
+    let swayY = 0;
+    if (this.state === "thinking") {
+      const since = t - this.thinkStepAt;
+      const env = Math.min(1, since * 3.2);
+      const s = Math.sin(since * 2.4) * 0.14 * env;
+      if (this.thinkAxis === 0) this.mesh.position.x = s;
+      else swayY = s;
+    } else {
+      this.mesh.position.x *= 0.8;
+    }
+    this.mesh.position.y = Math.sin(t * 1.5) * 0.12 + this.bounceOffset(dt) + swayY;
 
     let scale: number;
     if (this.transition.active) {

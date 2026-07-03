@@ -89,7 +89,7 @@ fn main() {
     println!("[2/2] Connecting and listing tools…");
     let server = mcp::McpServer {
         name: name.clone(),
-        transport: "http".into(),
+        transport: mcp::Transport::Http,
         command: String::new(),
         args: Vec::new(),
         env: std::collections::BTreeMap::new(),
@@ -98,7 +98,7 @@ fn main() {
         preset: String::new(),
         disabled_tools: Vec::new(),
     };
-    let mut conn = match mcp::http::HttpConnection::connect(&dir, &server) {
+    let mut conn = match mcp::http::connect(&dir, &server) {
         Ok(conn) => conn,
         Err(e) => {
             eprintln!("      ✗ connect/tools-list failed: {e}");
