@@ -13,7 +13,6 @@ type Step =
 interface GhosttyTab {
   dir: string;
   command?: string;
-  title?: string;
 }
 interface Workflow {
   name: string;

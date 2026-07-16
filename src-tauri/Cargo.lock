@@ -199,7 +199,6 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "socket2",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",

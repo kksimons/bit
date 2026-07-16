@@ -59,7 +59,9 @@ fn download_whisper_base(dir: &std::path::Path) -> Result<PathBuf, String> {
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("read: {e}"))?;
-            out.write_all(&chunk).await.map_err(|e| format!("write: {e}"))?;
+            out.write_all(&chunk)
+                .await
+                .map_err(|e| format!("write: {e}"))?;
         }
         out.flush().await.map_err(|e| format!("flush: {e}"))?;
         Ok::<(), String>(())
@@ -189,7 +191,7 @@ fn main() {
             std::process::exit(1);
         }
     };
-    println!("loaded (multilingual={}).", engine_is_multilingual(&engine));
+    println!("loaded.");
 
     let (samples, _rate) = match read_wav_mono_f32(std::path::Path::new(&wav)) {
         Ok(s) => s,
@@ -218,12 +220,6 @@ fn main() {
             std::process::exit(1);
         }
     }
-}
-
-fn engine_is_multilingual(_e: &WhisperEngine) -> bool {
-    // is_multilingual is a private field; tiny/base/large are multilingual,
-    // tiny.en/base.en are not. We downloaded the multilingual base, so true.
-    true
 }
 
 fn newest_wav(dir: &str) -> Option<String> {

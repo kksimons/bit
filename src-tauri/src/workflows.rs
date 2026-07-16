@@ -43,9 +43,6 @@ pub struct GhosttyTab {
     /// Optional command to run on open (stays in the shell, so dev servers live).
     #[serde(default)]
     pub command: Option<String>,
-    /// Optional human label (UI only).
-    #[serde(default)]
-    pub title: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -53,13 +50,9 @@ pub struct Workflow {
     pub name: String,
     #[serde(default)]
     pub trigger_phrases: Vec<String>,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::default_true")]
     pub enabled: bool,
     pub steps: Vec<Step>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn step_kind(s: &Step) -> &'static str {

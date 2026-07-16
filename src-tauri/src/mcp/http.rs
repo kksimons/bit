@@ -180,36 +180,17 @@ fn open_browser(url: &str) {
         .map_err(|e| eprintln!("[bit] couldn't open browser: {e}"));
 }
 
-/// Build the loopback listener socket: non-blocking, SO_REUSEADDR set, bound
-/// to 127.0.0.1. Extracted so the socket options are unit-testable without the
-/// non-determinism of bind→drop→rebind racing.
-fn build_loopback_socket(port: u16) -> Result<socket2::Socket, String> {
-    use socket2::{Domain, Protocol, Socket, Type};
-    Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
-        .and_then(|s| {
-            // Listen only on loopback — the callback must not be network-reachable.
-            s.set_reuse_address(true)?;
-            let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-            s.bind(&addr.into())?;
-            s.listen(16)?;
-            s.set_nonblocking(true)?;
-            Ok(s)
-        })
-        .map_err(|e| format!("couldn't bind callback port {port}: {e}"))
-}
-
-/// Bind the loopback callback listener with SO_REUSEADDR, so an interrupted
-/// OAuth flow (socket lingering in TIME_WAIT) doesn't make the next bind fail
-/// with “Address already in use” for a minute or two.
+/// Bind the loopback callback listener. tokio's `TcpListener::bind` sets
+/// `SO_REUSEADDR` on Unix, so an interrupted OAuth flow (socket lingering in
+/// TIME_WAIT) won't make the next bind fail with "Address already in use".
 async fn bind_loopback(port: u16) -> Result<TcpListener, String> {
-    let sock = build_loopback_socket(port)?;
-    TcpListener::from_std(sock.into()).map_err(|e| {
+    TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| {
         // AddrInUse is most often a stale Bit process holding the port.
         if e.kind() == std::io::ErrorKind::AddrInUse {
             format!(
                 "Bit's sign-in callback port {port} is already in use — likely a \
-                 stale Bit process. Quit Bit fully (tray → Quit Bit) and try again. \
-                 (Underlying error: {e})"
+                     stale Bit process. Quit Bit fully (tray → Quit Bit) and try again. \
+                     (Underlying error: {e})"
             )
         } else {
             format!("couldn't bind callback port {port}: {e}")
@@ -292,18 +273,16 @@ async fn wait_for_callback() -> Result<(String, String), String> {
 mod tests {
     use super::*;
 
-    /// Reproduce the exact failure mode that bit the user: bind the callback
-    /// port, drop it, and immediately rebind. Without SO_REUSEADDR this fails
-    /// with “Address already in use” while the socket sits in TIME_WAIT.
-    /// Uses an ephemeral port (not 8473) so parallel test runs don't collide.
     /// The interrupted-OAuth-flow mitigation is SO_REUSEADDR on the loopback
-    /// socket. Verify it's actually set (deterministic), rather than
-    /// bind→drop→rebind racing, which is non-deterministic on macOS.
+    /// socket, which tokio's `TcpListener::bind` sets on Unix by default. Bind on
+    /// an ephemeral port (0) to verify the loopback bind path works without a
+    /// fixed-port collision.
     #[test]
-    fn loopback_socket_sets_reuseaddr() {
-        // Port 0 = OS picks at bind time, so there's no pre-pick collision window.
-        let sock = build_loopback_socket(0).expect("bind should succeed");
-        assert!(sock.reuse_address().unwrap(), "SO_REUSEADDR must be set");
+    fn loopback_bind_succeeds() {
+        let listener = tauri::async_runtime::block_on(async { bind_loopback(0).await })
+            .expect("bind should succeed");
+        // Bound to loopback, not 0.0.0.0.
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
     }
 
     #[test]

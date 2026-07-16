@@ -290,7 +290,7 @@ fn ask_openai(
                     .and_then(|a| a.as_str())
                     .unwrap_or("{}");
                 let input: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
-                let (result, _is_error) = run_and_log(app, name, &input);
+                let (result, _) = run_and_log(app, name, &input);
                 tools_called += 1;
                 messages.push(json!({
                     "role": "tool",

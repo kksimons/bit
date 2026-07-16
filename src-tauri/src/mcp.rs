@@ -63,7 +63,7 @@ pub struct McpServer {
     /// http only: the remote server's Streamable-HTTP endpoint.
     #[serde(default)]
     pub url: String,
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::default_true")]
     pub enabled: bool,
     /// Gallery preset (e.g. "gmail"). Blank for user-authored Custom servers.
     #[serde(default)]
@@ -73,10 +73,6 @@ pub struct McpServer {
     /// all tools on. Disabled tools are neither advertised nor callable.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 fn store_path(app: &tauri::AppHandle) -> Option<PathBuf> {

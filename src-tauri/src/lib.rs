@@ -495,18 +495,17 @@ fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 /// Max chars of tool output kept (in memory + shown to the model).
 pub(crate) const MAX_OUTPUT: usize = 4000;
 
+/// serde default for "enabled: bool" fields (which default to true, not false).
+pub(crate) fn default_true() -> bool {
+    true
+}
+
 /// Truncate `s` to [`MAX_OUTPUT`] bytes on a UTF-8 char boundary, with ellipsis.
 pub(crate) fn truncate_output(s: &mut String) {
     if s.len() <= MAX_OUTPUT {
         return;
     }
-    let cut = s
-        .char_indices()
-        .take_while(|(i, _)| *i <= MAX_OUTPUT)
-        .last()
-        .map(|(i, _)| i)
-        .unwrap_or(MAX_OUTPUT);
-    s.truncate(cut);
+    s.truncate(s.floor_char_boundary(MAX_OUTPUT));
     s.push_str("\n…[truncated]");
 }
 
@@ -636,8 +635,7 @@ fn spawn_passthrough(
             }
             // Cursor inside the window rect? Poll fast to catch the edge; else
             // slow way down — we only need to notice when it approaches.
-            let near = dx.abs() <= size.width as f64 / 2.0
-                && dy.abs() <= size.height as f64 / 2.0;
+            let near = dx.abs() <= size.width as f64 / 2.0 && dy.abs() <= size.height as f64 / 2.0;
             std::thread::sleep(if near { FAST } else { SLOW });
         }
     });
