@@ -64,6 +64,11 @@ export class Bit {
   // (x side-to-side ↔ y up-and-down) on each backend "step" nudge.
   private thinkAxis: 0 | 1 = 0;
   private thinkStepAt = 0;
+  // Idle throttle: in neutral (no transition/bounce) the motion is a slow spin
+  // + 2% bob — smooth at half frame-rate, so we skip every other frame to keep
+  // the GPU/compositor idle half the time. The rotation step is doubled on the
+  // frames we do render, so the spin rate is visually unchanged.
+  private skipNext = false;
   private sounds: Record<"yes" | "no", HTMLAudioElement> = {
     yes: new Audio("/sounds/bit-yes.mp3"),
     no: new Audio("/sounds/bit-no.mp3"),
@@ -198,12 +203,21 @@ export class Bit {
 
   private animate = () => {
     requestAnimationFrame(this.animate);
+    // Idle throttle: neutral with nothing else going on needs only ~30fps.
+    const idle = this.state === "neutral" && !this.transition.active && !this.bounce.active;
+    if (idle && this.skipNext) {
+      this.skipNext = false;
+      return; // drop this frame; the next one doubles the spin step
+    }
     const dt = this.clock.getDelta();
     const t = this.clock.elapsedTime;
 
+    // In idle we render every other frame; double the per-render rotation so
+    // the visible spin rate is unchanged from the 60fps path.
     const speed = ROTATION_SPEED[this.state];
-    this.mesh.rotation.y += speed;
-    this.mesh.rotation.x += speed * 0.4;
+    const rotMul = idle ? 2 : 1;
+    this.mesh.rotation.y += speed * rotMul;
+    this.mesh.rotation.x += speed * 0.4 * rotMul;
     // no: a gentle side-to-side head-shake (the universal "no" gesture).
     if (this.state === "no") {
       this.mesh.rotation.z = Math.sin(t * 14) * 0.09;
@@ -258,5 +272,7 @@ export class Bit {
     this.mesh.scale.setScalar(scale);
 
     this.renderer.render(this.scene, this.camera);
+    // Arm the next idle skip *after* a real render so motion stays smooth.
+    this.skipNext = idle;
   };
 }

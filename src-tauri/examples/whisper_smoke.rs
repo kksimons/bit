@@ -9,7 +9,10 @@
 //! Downloads `ggml-base.bin` (~141 MB) into the app's model dir on first run.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
+use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
 use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams};
 
 const WHISPER_BASE_URL: &str =
@@ -32,15 +35,44 @@ fn download_whisper_base(dir: &std::path::Path) -> Result<PathBuf, String> {
     }
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
     println!("downloading ggml-base.bin (~141 MB)…");
-    let mut resp = ureq::get(WHISPER_BASE_URL)
-        .call()
-        .map_err(|e| format!("download: {e}"))?;
+
+    // The example ships its own minimal tokio runtime to stream the download to
+    // disk (so a 141 MB file never sits whole in memory). Reuses reqwest, the
+    // same HTTP stack the app uses.
     let tmp = dir.join("models").join(".whisper-base.bin.part");
-    let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    std::io::copy(&mut resp.body_mut().as_reader(), &mut out).map_err(|e| e.to_string())?;
+    let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
+    let url = WHISPER_BASE_URL.to_string();
+    let tmp_clone = tmp.clone();
+    rt.block_on(async move {
+        let resp = client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("download: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("download: HTTP {status}"));
+        }
+        let mut out = tokio::fs::File::create(&tmp_clone)
+            .await
+            .map_err(|e| format!("create file: {e}"))?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("read: {e}"))?;
+            out.write_all(&chunk).await.map_err(|e| format!("write: {e}"))?;
+        }
+        out.flush().await.map_err(|e| format!("flush: {e}"))?;
+        Ok::<(), String>(())
+    })?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
     println!("downloaded.");
     Ok(path)
+}
+
+/// One shared reqwest client for the example (connection pooling).
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
 /// Decode a wav file to mono 16 kHz f32 (Whisper's expected input), reusing

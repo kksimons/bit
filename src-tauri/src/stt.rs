@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
@@ -95,6 +95,9 @@ pub fn model_ready(app_data: &Path, model_id: &str) -> bool {
 
 /// Download any missing files for a model. `on_progress` is called with
 /// (file_index, total_files, filename) as each completes.
+///
+/// Uses reqwest (shared with the MCP transport) via `block_on`, streaming each
+/// file to disk chunk-by-chunk so a 700 MB model never sits whole in memory.
 pub fn download_model<F: FnMut(usize, usize, &str)>(
     app_data: &Path,
     model_id: &str,
@@ -110,16 +113,53 @@ pub fn download_model<F: FnMut(usize, usize, &str)>(
             on_progress(i + 1, total, name);
             continue;
         }
-        let mut resp = ureq::get(*url)
-            .call()
-            .map_err(|e| format!("download {name}: {e}"))?;
-        let tmp = dir.join(format!("{name}.part"));
-        let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        std::io::copy(&mut resp.body_mut().as_reader(), &mut out).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+        download_file(url, name, &dir)?;
         on_progress(i + 1, total, name);
     }
     Ok(())
+}
+
+/// Fetch one model file and write it atomically: stream to `<name>.part`, then
+/// rename on success so a partial download never looks complete.
+fn download_file(url: &str, name: &str, dir: &Path) -> Result<(), String> {
+    let url = url.to_string();
+    let tmp = dir.join(format!("{name}.part"));
+    let dest = dir.join(name);
+    tauri::async_runtime::handle().block_on(async move {
+        use futures_util::StreamExt;
+        let resp = http_client()
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| format!("download {name}: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("download {name}: HTTP {status}"));
+        }
+        let mut out = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| format!("download {name}: {e}"))?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| format!("download {name}: {e}"))?;
+            tokio::io::AsyncWriteExt::write_all(&mut out, &chunk)
+                .await
+                .map_err(|e| format!("download {name}: {e}"))?;
+        }
+        tokio::io::AsyncWriteExt::flush(&mut out)
+            .await
+            .map_err(|e| format!("download {name}: {e}"))?;
+        drop(out);
+        tokio::fs::rename(&tmp, &dest)
+            .await
+            .map_err(|e| format!("download {name}: {e}"))
+    })
+}
+
+/// Shared reqwest client for model downloads (connection pooling).
+fn http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
 /// Delete a model's files from disk. Best-effort.

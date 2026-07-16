@@ -26,12 +26,12 @@ serde_json = "1"
 # Local speech-to-text: Parakeet TDT 0.6B v2 via ONNX Runtime (CPU)
 transcribe-rs = { version = "0.3.11", default-features = false, features = ["onnx", "whisper-cpp"] }
 cpal = "0.18"
-ureq = { version = "3", features = ["json"] }
 tauri-plugin-autostart = "2"
 rmcp = { version = "2", features = ["auth", "client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 async-trait = "0.1.89"
-tokio = { version = "1.52.3", features = ["io-util", "net", "sync", "time", "rt"] }
-reqwest = { version = "0.13.4", features = ["json"] }
+tokio = { version = "1.52.3", features = ["io-util", "net", "sync", "time", "rt", "fs"] }
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
+futures-util = "0.3"
 url = "2.5.8"
 socket2 = "0.6.4"
 libc = "0.2.186"
@@ -42,4 +42,18 @@ all = "warn"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Release tuning — follows the Tauri v2 App Size guide:
+# https://v2.tauri.app/concept/size/
+#   lto + codegen-units=1 let the optimizer cross-crate inline and dead-strip,
+#   opt-level="s" targets size, strip drops debug symbols, panic="abort"
+#   removes the unwinding tables.
+# Trade-off: panic="abort" means any panic exits the whole app rather than
+# just the panicking thread, and incremental release compiles are slower.
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = true
+panic = "abort"
 

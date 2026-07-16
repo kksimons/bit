@@ -4,6 +4,11 @@ use serde_json::{json, Value};
 use std::sync::OnceLock;
 use tauri::Manager;
 
+/// Cap the body size the agent reads from an LLM endpoint (8 MiB). A yes/no
+/// verdict over a few tool turns is tiny; this only guards against a runaway
+/// server streaming megabytes back.
+const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 const SYSTEM: &str = "You are Bit, a desktop companion: a floating geometric polyhedron. \
 Act on the user's Mac using the tools available to you (run their saved workflows, open apps and \
 URLs, toggle Focus/Do Not Disturb, and — if enabled — other actions). When the user asks for \
@@ -305,23 +310,38 @@ fn ask_openai(
 
 // ---------- shared ----------
 
-/// One shared HTTP agent so connections are pooled across turns, skipping a TLS
-/// handshake on every POST after the first.
-fn http() -> &'static ureq::Agent {
-    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
-    AGENT.get_or_init(ureq::agent)
+/// One shared async HTTP client so connections are pooled across turns, skipping
+/// a TLS handshake on every POST after the first. Uses reqwest (already pulled
+/// by rmcp) so we avoid shipping a second HTTP stack (ureq).
+fn http() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new)
 }
 
+/// POST JSON and read the JSON response. The agent loop is synchronous (runs on
+/// std::threads), so we bridge to reqwest's async API via `block_on` — the same
+/// pattern `mcp/http.rs` uses. Safe because we are never inside an async context.
 fn post(url: &str, headers: &[(String, String)], body: Value) -> Result<Value, String> {
-    let mut req = http().post(url).header("content-type", "application/json");
-    for (k, v) in headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
-    match req.send_json(&body) {
-        Ok(mut r) => r.body_mut().read_json::<Value>().map_err(|e| e.to_string()),
-        Err(ureq::Error::StatusCode(code)) => Err(format!("HTTP {code}")),
-        Err(e) => Err(e.to_string()),
-    }
+    tauri::async_runtime::handle().block_on(async move {
+        let mut req = http().post(url).json(&body);
+        for (k, v) in headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+        let resp = req.send().await.map_err(|e| e.to_string())?;
+        let status = resp.status();
+        // Cap the body so a runaway server can't OOM us. A yes/no verdict over a
+        // few tool turns is tiny; 8 MiB is a generous ceiling.
+        let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err("response exceeded max size".into());
+        }
+        if !status.is_success() {
+            let snippet = String::from_utf8_lossy(&bytes);
+            let snippet = snippet.chars().take(500).collect::<String>();
+            return Err(format!("HTTP {}: {snippet}", status.as_u16()));
+        }
+        serde_json::from_slice::<Value>(&bytes).map_err(|e| format!("bad JSON: {e}"))
+    })
 }
 
 /// Map free text to (verdict, times): count yes/no words, pick the winner, cap 3.

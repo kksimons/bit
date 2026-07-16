@@ -581,30 +581,47 @@ fn open_settings(app: &tauri::AppHandle) {
 /// Keep the overlay click-through except over the Bit itself, so empty pixels
 /// pass clicks through. Polls the global cursor vs. the window center because
 /// the window receives no DOM mouse events while ignoring cursor events.
+///
+/// Adaptive interval: when the cursor is far from the window (the common case
+/// for an always-on overlay), poll slowly (~4 Hz) just to notice an approach;
+/// once it enters the window's bounding box, poll fast (~60 Hz) so the
+/// click-through transition onto the Bit feels instant. This cuts idle wakeups
+/// ~3.5× versus a fixed 70 ms without sacrificing hover responsiveness.
 fn spawn_passthrough(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     dragging: Arc<AtomicBool>,
 ) {
+    /// Poll interval once the cursor is inside the window bounds (responsive).
+    const FAST: Duration = Duration::from_millis(16);
+    /// Poll interval while the cursor is elsewhere (just watching for approach).
+    const SLOW: Duration = Duration::from_millis(250);
+
     std::thread::spawn(move || {
         let mut last: Option<bool> = None;
         loop {
-            std::thread::sleep(std::time::Duration::from_millis(70));
             // While dragging/flinging, leave the window interactive.
             if dragging.load(Ordering::Relaxed) {
                 if last != Some(true) {
                     let _ = window.set_ignore_cursor_events(false);
                     last = Some(true);
                 }
+                std::thread::sleep(FAST);
                 continue;
             }
             let (pos, size) = match (window.outer_position(), window.outer_size()) {
                 (Ok(p), Ok(s)) => (p, s),
-                _ => continue,
+                _ => {
+                    std::thread::sleep(SLOW);
+                    continue;
+                }
             };
             let cursor = match app.cursor_position() {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(_) => {
+                    std::thread::sleep(SLOW);
+                    continue;
+                }
             };
             let cx = pos.x as f64 + size.width as f64 / 2.0;
             let cy = pos.y as f64 + size.height as f64 / 2.0;
@@ -617,6 +634,11 @@ fn spawn_passthrough(
                 last = Some(over);
                 let _ = window.set_ignore_cursor_events(!over);
             }
+            // Cursor inside the window rect? Poll fast to catch the edge; else
+            // slow way down — we only need to notice when it approaches.
+            let near = dx.abs() <= size.width as f64 / 2.0
+                && dy.abs() <= size.height as f64 / 2.0;
+            std::thread::sleep(if near { FAST } else { SLOW });
         }
     });
 }
