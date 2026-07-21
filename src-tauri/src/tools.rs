@@ -1,5 +1,5 @@
 use crate::workflows::{self, GhosttyTab, Step, Workflow};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::process::Command;
 use tauri::Manager;
 

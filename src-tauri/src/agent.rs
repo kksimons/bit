@@ -1,6 +1,6 @@
 use crate::config::AgentConfig;
 use crate::{tools, workflows};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::OnceLock;
 use tauri::Manager;
 
@@ -200,10 +200,10 @@ fn ask_anthropic(
 
         let mut text = String::new();
         for block in &content {
-            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                    text.push_str(t);
-                }
+            if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                && let Some(t) = block.get("text").and_then(|t| t.as_str())
+            {
+                text.push_str(t);
             }
         }
         let (verdict, times) = reduce_verdict(&text);

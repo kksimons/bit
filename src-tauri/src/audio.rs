@@ -47,7 +47,9 @@ impl Recorder {
             let config = match device.default_input_config() {
                 Ok(c) => c,
                 Err(e) => {
-                    fail(format!("microphone not available ({e}). If macOS never prompted, grant Bit Microphone permission in System Settings → Privacy."));
+                    fail(format!(
+                        "microphone not available ({e}). If macOS never prompted, grant Bit Microphone permission in System Settings → Privacy."
+                    ));
                     return;
                 }
             };
@@ -94,7 +96,9 @@ impl Recorder {
             let stream = match stream {
                 Ok(s) => s,
                 Err(e) => {
-                    fail(format!("couldn't open microphone ({e}). Grant Bit Microphone permission in System Settings → Privacy if you haven't."));
+                    fail(format!(
+                        "couldn't open microphone ({e}). Grant Bit Microphone permission in System Settings → Privacy if you haven't."
+                    ));
                     return;
                 }
             };

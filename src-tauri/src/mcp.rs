@@ -13,12 +13,12 @@
 pub mod http;
 pub mod oauth;
 
+use rmcp::ServiceExt;
 use rmcp::model::{CallToolRequestParams, ClientInfo, Tool as RmcpTool};
 use rmcp::service::{RoleClient, RunningService};
 use rmcp::transport::child_process::TokioChildProcess;
-use rmcp::ServiceExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -406,13 +406,13 @@ pub(crate) fn flatten_mcp_content(result: &Value) -> String {
     let mut out = String::new();
     if let Some(arr) = result.get("content").and_then(|c| c.as_array()) {
         for block in arr {
-            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
-                    if !out.is_empty() {
-                        out.push('\n');
-                    }
-                    out.push_str(t);
+            if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                && let Some(t) = block.get("text").and_then(|t| t.as_str())
+            {
+                if !out.is_empty() {
+                    out.push('\n');
                 }
+                out.push_str(t);
             }
         }
     }

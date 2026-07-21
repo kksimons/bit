@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
+use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::whisper_cpp::{WhisperEngine, WhisperInferenceParams};
 
 // ============================ model registry ============================
@@ -223,10 +223,11 @@ impl Stt {
 
     /// Download (if needed) and load the active model. Reloads if the id changed.
     pub fn ensure_loaded(&self, active_model_id: &str) -> Result<(), String> {
-        if let Some(id) = self.loaded_id.lock().unwrap().as_ref() {
-            if id == active_model_id && self.model.lock().unwrap().is_some() {
-                return Ok(());
-            }
+        if let Some(id) = self.loaded_id.lock().unwrap().as_ref()
+            && id == active_model_id
+            && self.model.lock().unwrap().is_some()
+        {
+            return Ok(());
         }
 
         if !model_ready(&self.app_data, active_model_id) {

@@ -14,7 +14,7 @@
 //! The file-touching core takes a `&Path` (the config dir) so it's unit-testable
 //! with a temp dir; the `AppHandle`-based public API is a thin wrapper over it.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -227,10 +227,10 @@ pub fn recall_from(dir: &Path, query: Option<&str>, limit: usize) -> String {
             let Some(fmt) = format_event(&v) else {
                 continue;
             };
-            if let Some(q) = &q {
-                if !fmt.to_lowercase().contains(q) {
-                    continue;
-                }
+            if let Some(q) = &q
+                && !fmt.to_lowercase().contains(q)
+            {
+                continue;
             }
             events.push(fmt);
         }

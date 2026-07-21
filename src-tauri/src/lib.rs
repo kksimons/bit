@@ -13,9 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::{
+    Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -71,10 +71,10 @@ fn save_settings(
     api_key: Option<String>,
 ) -> Result<(), String> {
     config::save_settings(&app, &settings)?;
-    if let Some(k) = api_key {
-        if !k.is_empty() {
-            config::set_key(&app, &k)?;
-        }
+    if let Some(k) = api_key
+        && !k.is_empty()
+    {
+        config::set_key(&app, &k)?;
     }
     Ok(())
 }
@@ -863,12 +863,12 @@ pub fn run() {
         .on_window_event(|window, event| {
             // Drop back to accessory mode once settings is closed.
             #[cfg(target_os = "macos")]
-            if window.label() == "config" {
-                if let tauri::WindowEvent::Destroyed = event {
-                    let _ = window
-                        .app_handle()
-                        .set_activation_policy(ActivationPolicy::Accessory);
-                }
+            if window.label() == "config"
+                && let tauri::WindowEvent::Destroyed = event
+            {
+                let _ = window
+                    .app_handle()
+                    .set_activation_policy(ActivationPolicy::Accessory);
             }
         })
         .invoke_handler(tauri::generate_handler![

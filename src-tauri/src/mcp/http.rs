@@ -12,17 +12,17 @@
 
 use std::time::Duration;
 
+use rmcp::ServiceExt;
 use rmcp::model::ClientInfo;
 use rmcp::transport::auth::{AuthClient, AuthorizationManager, OAuthState};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
-use rmcp::ServiceExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use super::oauth::{FileCredentialStore, REDIRECT_URI};
-use super::{tool_to_value, McpServer, RmcpConnection};
+use super::{McpServer, RmcpConnection, tool_to_value};
 
 /// Where a server's OAuth token file lives: `<config_dir>/mcp/<name>.token.json`.
 fn token_path(config_dir: &std::path::Path, name: &str) -> std::path::PathBuf {

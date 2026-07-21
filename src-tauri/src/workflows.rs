@@ -19,6 +19,10 @@ pub enum Step {
     OpenUrl {
         url: String,
     },
+    // `rename_all = "snake_case"` would mangle this to "apple_script", but every
+    // other surface (TS UI, the HTML dropdown, step_kind, the save_workflow tool
+    // docs) uses "applescript". Pin it so a saved workflow round-trips.
+    #[serde(rename = "applescript")]
     AppleScript {
         script: String,
     },
@@ -160,10 +164,10 @@ fn expand_tilde(dir: &str) -> String {
         if let Ok(home) = std::env::var("HOME") {
             return format!("{home}/{rest}");
         }
-    } else if dir == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return home;
-        }
+    } else if dir == "~"
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return home;
     }
     dir.to_string()
 }
@@ -179,13 +183,13 @@ pub fn ghostty_script(tabs: &[GhosttyTab]) -> String {
             "    set initial working directory of {cfg} to \"{}\"\n",
             ascript(&expand_tilde(&tab.dir))
         ));
-        if let Some(cmd) = &tab.command {
-            if !cmd.trim().is_empty() {
-                s.push_str(&format!(
-                    "    set initial input of {cfg} to \"{}\\n\"\n",
-                    ascript(cmd)
-                ));
-            }
+        if let Some(cmd) = &tab.command
+            && !cmd.trim().is_empty()
+        {
+            s.push_str(&format!(
+                "    set initial input of {cfg} to \"{}\\n\"\n",
+                ascript(cmd)
+            ));
         }
         if i == 0 {
             s.push_str(&format!(
@@ -216,4 +220,40 @@ pub fn run_ghostty(tabs: &[GhosttyTab]) -> Result<String, String> {
         ));
     }
     Ok(format!("opened Ghostty with {} tab(s)", tabs.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `applescript` step type must round-trip under the serde tag derived
+    /// from `#[serde(rename_all = "snake_case")]`. Before the explicit
+    /// `#[serde(rename = "applescript")]`, serde produced "apple_script", which
+    /// mismatched the TS UI / HTML / `step_kind` / `save_workflow` docs — so any
+    /// workflow with an AppleScript step failed to parse on load and silently
+    /// emptied the whole workflow list.
+    #[test]
+    fn applescript_step_round_trips() {
+        let wf = Workflow {
+            name: "t".into(),
+            trigger_phrases: vec![],
+            enabled: true,
+            steps: vec![Step::AppleScript {
+                script: "tell app \"x\"".into(),
+            }],
+        };
+        let json = serde_json::to_string(&wf).unwrap();
+        assert!(
+            json.contains(r#""type":"applescript""#),
+            "serialized tag must be applescript, got: {json}"
+        );
+        let back: Workflow = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back.steps[0], Step::AppleScript { .. }));
+
+        // Also accept a hand-authored applescript step (what the UI / LLM emits).
+        let hand = r#"[{"name":"t","trigger_phrases":[],"enabled":true,
+            "steps":[{"type":"applescript","script":"tell app \"x\""}]}]"#;
+        let parsed: Vec<Workflow> = serde_json::from_str(hand).unwrap();
+        assert!(matches!(parsed[0].steps[0], Step::AppleScript { .. }));
+    }
 }
