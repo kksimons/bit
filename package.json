@@ -1,14 +1,14 @@
 {
   "name": "bit",
-  "private": true,
   "version": "0.3.2",
+  "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsgo --noEmit -p tsconfig.json && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "typecheck": "tsgo --noEmit -p tsconfig.json",
+    "typecheck": "bun --check",
     "lint": "biome check",
     "lint:fix": "biome check --write",
     "lint:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
